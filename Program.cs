@@ -121,6 +121,14 @@ if (key == null || !switches.ContainsKey(key))
     return;
 }
 var sw = switches[key];
+// ===== Защита от двойного клика =====
+// У каждой функции своя именованная «табличка» (mutex). Пока она занята,
+// вторая копия программы для этой же функции сразу выходит.
+var guard = new Mutex(false, "OCS_Guard_" + key);
+bool gotGuard;
+try { gotGuard = guard.WaitOne(0); }
+catch (AbandonedMutexException) { gotGuard = true; }   // прошлая копия аварийно закрылась: табличка свободна
+if (!gotGuard) return;
 
 // ===== Радиомодули (Bluetooth, Wi-Fi): узнать состояние =====
 async Task<int> GetRadioState(RadioKind kind)
@@ -399,7 +407,10 @@ var closeTimer = new System.Windows.Forms.Timer { Interval = 1300 };
 closeTimer.Tick += (s, e) => osd.Close();
 closeTimer.Start();
 
-Application.Run(osd);
+// Табличку снимаем через время двойного щелчка Windows (обычно 500 мс)
+var guardTimer = new System.Windows.Forms.Timer { Interval = SystemInformation.DoubleClickTime };
+guardTimer.Tick += (s, e) => { guardTimer.Stop(); guard.ReleaseMutex(); };
+guardTimer.Start();Application.Run(osd);
 GC.KeepAlive(player);
 
 // ===== Типы: обязательно в самом конце файла =====
@@ -555,7 +566,7 @@ static class ShutdownCountdown
                 cancelEvent.WaitOne();
                 form.BeginInvoke(new Action(() =>
                 {
-                    // Первую секунду игнорируем: так двойной клик не отменит отсчёт
+                    // Время двойного щелчка Windows игнорируем: так случайный двойной клик не отменит отсчёт
                     if ((DateTime.Now - started).TotalMilliseconds < 1000) return;
                     Cancel();
                 }));
