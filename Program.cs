@@ -55,9 +55,20 @@ var switches = new Dictionary<string, (string Name, Func<Task<int>> Toggle, Func
     ["sound"] = ("Звук", () => Task.FromResult(ToggleSound()), () => Task.FromResult(GetSoundState())),
 };
 
-// ===== Плашка «Статус»: --status показывает состояние всех выключателей на 4 секунды =====
+// ===== Плашка «Статус»: --status показывает состояние всех выключателей на 5 секунд =====
+// Повторный запуск (ещё один клик по ярлыку) закрывает плашку, а не открывает вторую
 if (args.Contains("--status"))
 {
+    // Одна копия: вторая просит первую закрыться и сразу выходит
+    using var statusMutex = new Mutex(true, "OCS_StatusPanel", out bool statusIsNew);
+    var statusCloseEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "OCS_StatusClose");
+    if (!statusIsNew)
+    {
+        statusCloseEvent.Set();
+        return;
+    }
+    var statusStarted = DateTime.Now;
+
     var rows = new List<(string Name, int State)>();
     foreach (var kv in switches)
         rows.Add((kv.Value.Name, kv.Value.GetState().GetAwaiter().GetResult()));
@@ -99,9 +110,28 @@ if (args.Contains("--status"))
     };
     panel.Click += (s, e) => panel.Close();
 
-    var statusTimer = new System.Windows.Forms.Timer { Interval = 4000 };
+    var statusTimer = new System.Windows.Forms.Timer { Interval = 5000 };
     statusTimer.Tick += (s, e) => panel.Close();
     statusTimer.Start();
+
+    // Фоновый «слушатель»: ждёт сигнала «закрой» от второй копии программы
+    _ = panel.Handle;
+    statusCloseEvent.Reset();   // клики, пришедшие, пока плашка ещё готовилась, не считаем
+    var statusWaiter = new Thread(() =>
+    {
+        while (true)
+        {
+            statusCloseEvent.WaitOne();
+            panel.BeginInvoke(new Action(() =>
+            {
+                // Время двойного щелчка Windows игнорируем: так случайный двойной клик не закроет плашку
+                if ((DateTime.Now - statusStarted).TotalMilliseconds < SystemInformation.DoubleClickTime) return;
+                panel.Close();
+            }));
+        }
+    })
+    { IsBackground = true };
+    statusWaiter.Start();
 
     Application.Run(panel);
     return;
