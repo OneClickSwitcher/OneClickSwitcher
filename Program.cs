@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Media;
@@ -15,7 +15,7 @@ ApplicationConfiguration.Initialize();
 const string camKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
 const string camSystemKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
 
-// ===== Действия без состояния: --action имя (блокировка, сон, выключение) =====
+// ===== Действия без состояния: --action имя (блокировка, сон, выключение, перезагрузка) =====
 int aIdx = Array.IndexOf(args, "--action");
 if (aIdx >= 0 && aIdx + 1 < args.Length)
 {
@@ -33,7 +33,13 @@ if (aIdx >= 0 && aIdx + 1 < args.Length)
     if (action == "shutdown")
     {
         // С приставкой --test компьютер в конце не выключается
-        ShutdownCountdown.Run(args.Contains("--test"));
+        ShutdownCountdown.Run(false, args.Contains("--test"));
+        return;
+    }
+    if (action == "restart")
+    {
+        // С приставкой --test компьютер в конце не перезагружается
+        ShutdownCountdown.Run(true, args.Contains("--test"));
         return;
     }
 }
@@ -47,7 +53,6 @@ var switches = new Dictionary<string, (string Name, Func<Task<int>> Toggle, Func
     ["wifi"] = ("Wi-Fi", () => ToggleRadio(RadioKind.WiFi), () => GetRadioState(RadioKind.WiFi)),
     ["mic"] = ("Микрофон", () => Task.FromResult(ToggleMicrophones()), () => Task.FromResult(GetMicState())),
     ["sound"] = ("Звук", () => Task.FromResult(ToggleSound()), () => Task.FromResult(GetSoundState())),
-    
 };
 
 // ===== Плашка «Статус»: --status показывает состояние всех выключателей на 4 секунды =====
@@ -115,12 +120,13 @@ if (key == null || !switches.ContainsKey(key))
         "OneClickSwitcher.exe --action lock" + Environment.NewLine +
         "OneClickSwitcher.exe --status" + Environment.NewLine + Environment.NewLine +
         "Выключатели: " + string.Join(", ", switches.Keys) + Environment.NewLine +
-        "Действия: lock, sleep, shutdown" + Environment.NewLine + Environment.NewLine +
+        "Действия: lock, sleep, shutdown, restart" + Environment.NewLine + Environment.NewLine +
         "Получено: [" + string.Join(" | ", args) + "]",
         "One Click Switcher");
     return;
 }
 var sw = switches[key];
+
 // ===== Защита от двойного клика =====
 // У каждой функции своя именованная «табличка» (mutex). Пока она занята,
 // вторая копия программы для этой же функции сразу выходит.
@@ -410,7 +416,9 @@ closeTimer.Start();
 // Табличку снимаем через время двойного щелчка Windows (обычно 500 мс)
 var guardTimer = new System.Windows.Forms.Timer { Interval = SystemInformation.DoubleClickTime };
 guardTimer.Tick += (s, e) => { guardTimer.Stop(); guard.ReleaseMutex(); };
-guardTimer.Start();Application.Run(osd);
+guardTimer.Start();
+
+Application.Run(osd);
 GC.KeepAlive(player);
 
 // ===== Типы: обязательно в самом конце файла =====
@@ -441,11 +449,17 @@ static class NativeMethods
     public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
 }
 
-// Выключение с отсчётом: 5, 4, 3, 2, 1, затем секунда «Shut down» и выключение
+// Выключение или перезагрузка с отсчётом: 5, 4, 3, 2, 1, затем секунда «Shut down» / «Restart» и действие
 static class ShutdownCountdown
 {
-    public static void Run(bool test)
+    public static void Run(bool restart, bool test)
     {
+        // Всё, что отличается у выключения и перезагрузки, собрано в четырёх строках
+        string verb = restart ? "Перезагрузка компьютера" : "Выключение компьютера";
+        string finalWord = restart ? "Restart" : "Shut down";
+        string finalHint = restart ? "Перезагрузка..." : "Выключение...";
+        string command = restart ? "/r /t 0" : "/s /t 0";
+
         // Одна копия: вторая не начинает отсчёт заново, а просит первую отменить его
         using var mutex = new Mutex(true, "OCS_ShutdownCountdown", out bool isNew);
         var cancelEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "OCS_ShutdownCancel");
@@ -479,7 +493,7 @@ static class ShutdownCountdown
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = Color.FromArgb(200, 200, 200),
             Font = new Font("Segoe UI", 12),
-            Text = test ? "Выключение компьютера (тест)" : "Выключение компьютера"
+            Text = test ? verb + " (тест)" : verb
         };
         var big = new Label
         {
@@ -511,7 +525,7 @@ static class ShutdownCountdown
 
         var timer = new System.Windows.Forms.Timer { Interval = 1000 };
 
-        // Отмена возможна, пока не появилась надпись «Shut down»
+        // Отмена возможна, пока не появилась надпись «Shut down» / «Restart»
         void Cancel()
         {
             if (!canCancel) return;
@@ -537,9 +551,9 @@ static class ShutdownCountdown
             else if (left == 0)
             {
                 canCancel = false;
-                big.Text = "Shut down";
+                big.Text = finalWord;
                 big.Font = new Font("Segoe UI", 26, FontStyle.Bold);
-                hint.Text = test ? "Тестовый режим: компьютер не выключится" : "Выключение...";
+                hint.Text = test ? "Тестовый режим: компьютер не " + (restart ? "перезагрузится" : "выключится") : finalHint;
                 btn.Enabled = false;
             }
             else
@@ -547,7 +561,7 @@ static class ShutdownCountdown
                 timer.Stop();
                 if (!test)
                 {
-                    Process.Start(new ProcessStartInfo("shutdown", "/s /t 0")
+                    Process.Start(new ProcessStartInfo("shutdown", command)
                     {
                         CreateNoWindow = true,
                         UseShellExecute = false
@@ -567,7 +581,7 @@ static class ShutdownCountdown
                 form.BeginInvoke(new Action(() =>
                 {
                     // Время двойного щелчка Windows игнорируем: так случайный двойной клик не отменит отсчёт
-                    if ((DateTime.Now - started).TotalMilliseconds < 1000) return;
+                    if ((DateTime.Now - started).TotalMilliseconds < SystemInformation.DoubleClickTime) return;
                     Cancel();
                 }));
             }
