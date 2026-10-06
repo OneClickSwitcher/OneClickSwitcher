@@ -22,12 +22,17 @@ if (aIdx >= 0 && aIdx + 1 < args.Length)
     var action = args[aIdx + 1].ToLowerInvariant();
     if (action == "lock")
     {
+        // Защита от двойного клика: пока первая копия работает, вторая молча выходит
+        if (!Guard.TryEnter("lock")) return;
         NativeMethods.LockWorkStation();
+        Thread.Sleep(SystemInformation.DoubleClickTime);   // держим «табличку» ещё немного
         return;
     }
     if (action == "sleep")
     {
+        if (!Guard.TryEnter("sleep")) return;
         NativeMethods.SetSuspendState(false, false, false);
+        Thread.Sleep(SystemInformation.DoubleClickTime);   // иначе повторный клик усыпил бы компьютер снова после пробуждения
         return;
     }
     if (action == "shutdown")
@@ -479,6 +484,70 @@ static class NativeMethods
     public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
 }
 
+// «Табличка» для действий (блокировка, сон): вторая копия с тем же именем сразу выходит
+static class Guard
+{
+    static Mutex? held;   // держим ссылку, пока работает программа
+
+    public static bool TryEnter(string name)
+    {
+        held = new Mutex(false, "OCS_Guard_" + name);
+        try { return held.WaitOne(0); }
+        catch (AbandonedMutexException) { return true; }   // прошлая копия закрылась аварийно: табличка свободна
+    }
+}
+
+// Звук отсчёта: короткие мягкие ноты, собранные в памяти (одна или несколько подряд)
+static class Beeper
+{
+    const int Rate = 44100;
+    static SoundPlayer? current;   // держим ссылку, чтобы звук не оборвался при уборке памяти
+
+    // Ноты: (частота в герцах, длительность в миллисекундах)
+    public static void Play(double volume, params (double Hz, int Ms)[] notes)
+    {
+        var samples = new List<short>();
+        for (int i = 0; i < Rate / 10; i++) samples.Add(0);   // 100 мс тишины: устройство вывода успевает «проснуться»
+
+        foreach (var (hz, ms) in notes)
+        {
+            int n = Rate * ms / 1000;
+            for (int i = 0; i < n; i++)
+            {
+                double t = (double)i / Rate;
+                // Плавное нарастание (10 мс) и затухание (40 мс), чтобы не было щелчков
+                double attack = Math.Min(1.0, t / 0.010);
+                double release = Math.Min(1.0, (double)(n - i) / (Rate * 0.040));
+                double v = Math.Sin(2 * Math.PI * hz * t) * attack * release * volume;
+                samples.Add((short)(Math.Clamp(v, -1.0, 1.0) * short.MaxValue));
+            }
+        }
+
+        var stream = new MemoryStream();
+        var w = new BinaryWriter(stream);
+        int dataLen = samples.Count * 2;
+        w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+        w.Write(36 + dataLen);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+        w.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+        w.Write(16);
+        w.Write((short)1);
+        w.Write((short)1);
+        w.Write(Rate);
+        w.Write(Rate * 2);
+        w.Write((short)2);
+        w.Write((short)16);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+        w.Write(dataLen);
+        foreach (var s in samples) w.Write(s);
+        w.Flush();
+        stream.Position = 0;
+
+        current = new SoundPlayer(stream);
+        current.Play();
+    }
+}
+
 // Выключение или перезагрузка с отсчётом: 5, 4, 3, 2, 1, затем секунда «Shut down» / «Restart» и действие
 static class ShutdownCountdown
 {
@@ -489,6 +558,9 @@ static class ShutdownCountdown
         string finalWord = restart ? "Restart" : "Shut down";
         string finalHint = restart ? "Перезагрузка..." : "Выключение...";
         string command = restart ? "/r /t 0" : "/s /t 0";
+
+        // Ноты отсчёта сверху вниз: на каждую цифру 5, 4, 3, 2, 1 своя (частота в герцах)
+        double[] tones = { 988.0, 880.0, 784.0, 659.0, 587.0 };
 
         // Одна копия: вторая не начинает отсчёт заново, а просит первую отменить его
         using var mutex = new Mutex(true, "OCS_ShutdownCountdown", out bool isNew);
@@ -559,8 +631,15 @@ static class ShutdownCountdown
         void Cancel()
         {
             if (!canCancel) return;
+            canCancel = false;   // второй раз не отменяем
             timer.Stop();
-            form.Close();
+
+            // Восходящий сигнал отмены. Окно исчезает сразу, а процесс живёт ещё полсекунды ради звука
+            Beeper.Play(0.35, (523.0, 90), (784.0, 150));
+            form.Hide();
+            var closeLater = new System.Windows.Forms.Timer { Interval = 450 };
+            closeLater.Tick += (s2, e2) => { closeLater.Stop(); form.Close(); };
+            closeLater.Start();
         }
 
         form.Click += (s, e) => Cancel();
@@ -569,7 +648,11 @@ static class ShutdownCountdown
         hint.Click += (s, e) => Cancel();
         btn.Click += (s, e) => Cancel();
         form.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Cancel(); };
-        form.Shown += (s, e) => form.Activate();
+        form.Shown += (s, e) =>
+        {
+            form.Activate();
+            Beeper.Play(0.35, (tones[0], 150));   // нота для цифры 5
+        };
 
         timer.Tick += (s, e) =>
         {
@@ -577,10 +660,12 @@ static class ShutdownCountdown
             if (left > 0)
             {
                 big.Text = left.ToString();
+                Beeper.Play(0.35, (tones[5 - left], 150));   // нота для цифры 4, 3, 2, 1
             }
             else if (left == 0)
             {
                 canCancel = false;
+                Beeper.Play(0.4, (392.0, 450));   // низкая длинная нота: отмена уже невозможна
                 big.Text = finalWord;
                 big.Font = new Font("Segoe UI", 26, FontStyle.Bold);
                 hint.Text = test ? "Тестовый режим: компьютер не " + (restart ? "перезагрузится" : "выключится") : finalHint;
