@@ -804,10 +804,31 @@ static class Shortcuts
     public static string IconsDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OneClickSwitcher", "icons");
 
-    // Возвращает, сколько ярлыков создано
-    public static int CreateOnDesktop(IEnumerable<string> keys)
+    // Постоянная папка программы: в профиле пользователя, права администратора не нужны
+    public static string InstallDir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "OneClickSwitcher");
+
+    // Копирует программу в постоянную папку и возвращает путь к копии.
+    // copied = false, если программа уже запущена оттуда (копировать нечего).
+    // Если копия занята (например, открыт отсчёт выключения), бросает исключение
+    public static string Install(out bool copied)
     {
         string exe = Environment.ProcessPath ?? "";
+        string target = Path.Combine(InstallDir, "OneClickSwitcher.exe");
+        copied = false;
+        if (exe == "") throw new InvalidOperationException("Не удалось определить путь к программе");
+        if (string.Equals(Path.GetFullPath(exe), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
+            return exe;
+
+        Directory.CreateDirectory(InstallDir);
+        File.Copy(exe, target, true);
+        copied = true;
+        return target;
+    }
+
+    // Создаёт ярлыки на программу exe. Возвращает, сколько ярлыков создано
+    public static int CreateOnDesktop(IEnumerable<string> keys, string exe)
+    {
         string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (exe == "" || shellType == null) return 0;
@@ -1018,14 +1039,15 @@ class FirstRunForm : Form
         // Заметка
         var note = AddLabel(
             "Закреплённые значки работают сами по себе, поэтому ярлыки с рабочего стола после этого можно удалить. " +
-            "Папку с программой удалять и переносить нельзя: ярлыки ведут в неё и перестанут работать.",
+            "Саму программу, которую мы скопируем в постоянную папку, удалять и переносить нельзя: ярлыки ведут в неё.",
             24, 574, 632, 84, 15);
         note.BackColor = Theme.Note;
         note.Padding = new Padding(Ui.S(14), Ui.S(10), Ui.S(14), Ui.S(10));
         lower.Add(note);
 
         // Кнопки и результат
-        var result = AddLabel("", 24, 672, 320, 40, 14, color: Theme.On);
+        var result = AddLabel("Программа скопируется в вашу папку пользователя, ярлыки будут вести туда.",
+            24, 672, 320, 40, 13, color: Theme.Sub);
         result.TextAlign = ContentAlignment.MiddleLeft;
         var close = AddButton("Закрыть", 536, 120, false);
         var create = AddButton("Создать ярлыки", 354, 170, true);
@@ -1035,21 +1057,41 @@ class FirstRunForm : Form
         close.Click += (s, e) => Close();
         create.Click += (s, e) =>
         {
-            int n;
+            var chosen = rows.Where(r => r.Checked).Select(r => r.Key).ToList();
+            if (chosen.Count == 0)
+            {
+                result.ForeColor = Theme.Sub;
+                result.Text = "Ничего не выбрано.";
+                return;
+            }
+
+            // Сначала копируем программу в постоянную папку, потом делаем ярлыки на копию
+            string exePath;
+            bool copied;
             try
             {
-                n = Shortcuts.CreateOnDesktop(rows.Where(r => r.Checked).Select(r => r.Key).ToList());
+                exePath = Shortcuts.Install(out copied);
             }
             catch
             {
                 result.ForeColor = Theme.Bad;
-                result.Text = "Не удалось создать ярлыки.";
+                result.Text = "Не удалось скопировать программу. Закройте окна One Click Switcher и повторите.";
                 return;
+            }
+
+            int n;
+            try
+            {
+                n = Shortcuts.CreateOnDesktop(chosen, exePath);
+            }
+            catch
+            {
+                n = 0;
             }
             if (n == 0)
             {
-                result.ForeColor = Theme.Sub;
-                result.Text = "Ничего не выбрано.";
+                result.ForeColor = Theme.Bad;
+                result.Text = "Не удалось создать ярлыки.";
                 return;
             }
 
@@ -1068,13 +1110,17 @@ class FirstRunForm : Form
                 Size = new Size(Ui.S(56), Ui.S(56))
             });
             AddLabel("Готово: ярлыки созданы", 96, 98, 560, 34, 24, "Segoe UI Semibold");
-            AddLabel("Создано ярлыков: " + n + ". Они лежат на рабочем столе. Установка закончена, эту программу можно закрыть.",
+            AddLabel("Создано ярлыков: " + n + ". Они лежат на рабочем столе. Установка закончена, окно можно закрыть.",
                 96, 134, 560, 48, 16, color: Theme.Sub);
+            AddLabel(copied
+                    ? "Программа скопирована в папку " + Shortcuts.InstallDir + ". Файл, который вы запускали, теперь можно удалить."
+                    : "Программа уже работает из своей постоянной папки: " + Shortcuts.InstallDir + ".",
+                24, 188, 632, 44, 15, color: Theme.Sub);
             AddLabel("Осталось закрепить нужные ярлыки на панели задач. Как это сделать, написано ниже.",
-                24, 196, 632, 26, 16);
+                24, 236, 632, 26, 16);
 
             // Остальное поднимаем вверх на место выбора ярлыков
-            int delta = Ui.S(408 - 240);
+            int delta = Ui.S(408 - 276);
             foreach (var c in lower) c.Top -= delta;
             close.Left = Ui.S(656) - close.Width;     // кнопка «Закрыть» становится главной и правее
             close.BackColor = Theme.Primary;
@@ -1199,11 +1245,11 @@ static class Guard
     }
 }
 
-// Общая громкость всех звуков программы: 1.0 = как раньше, 0.4 = заметно тише, 0 = без звука.
+// Общая громкость всех звуков программы: 1.0 = как раньше, 0.7 = чуть тише, 0.4 = заметно тише, 0 = без звука.
 // Это единственное место, где её нужно менять.
 static class SoundSettings
 {
-    public const double Level = 0.4;
+    public const double Level = 0.7;
 }
 
 // Звук отсчёта: короткие мягкие ноты, собранные в памяти (одна или несколько подряд)
