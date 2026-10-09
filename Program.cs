@@ -15,6 +15,90 @@ ApplicationConfiguration.Initialize();
 const string camKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
 const string camSystemKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
 
+// ===== Диагностика: --diag ничего не меняет, только записывает отчёт о микрофонах и радио на рабочий стол =====
+if (args.Contains("--diag"))
+{
+    var rep = new System.Text.StringBuilder();
+    rep.AppendLine("One Click Switcher: отчёт диагностики");
+    rep.AppendLine("Время: " + DateTime.Now);
+    rep.AppendLine("Windows: " + System.Runtime.InteropServices.RuntimeInformation.OSDescription + " (" + Environment.OSVersion.Version + ")");
+    rep.AppendLine("64-разрядная система: " + Environment.Is64BitOperatingSystem);
+    rep.AppendLine();
+
+    try
+    {
+        using var en = new MMDeviceEnumerator();
+
+        string defConsole = "", defComm = "";
+        try { defConsole = en.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console).ID; } catch { }
+        try { defComm = en.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications).ID; } catch { }
+
+        var all = en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.All).ToList();
+        rep.AppendLine("=== Микрофоны (устройства записи): всего " + all.Count + " ===");
+        rep.AppendLine("Во время теста говорите в микрофон или стучите по столу 2 секунды: так видно, слышит ли его Windows.");
+        rep.AppendLine();
+
+        // Замеряем уровень сигнала 2 секунды (20 замеров по 0,1 с)
+        var peaks = new Dictionary<string, float>();
+        for (int i = 0; i < 20; i++)
+        {
+            foreach (var d in all)
+            {
+                if (d.State != DeviceState.Active) continue;
+                try
+                {
+                    float p = d.AudioMeterInformation.MasterPeakValue;
+                    if (!peaks.ContainsKey(d.ID) || p > peaks[d.ID]) peaks[d.ID] = p;
+                }
+                catch { }
+            }
+            Thread.Sleep(100);
+        }
+
+        int n = 0;
+        foreach (var d in all)
+        {
+            n++;
+            rep.AppendLine("Микрофон " + n);
+            try { rep.AppendLine("  Название: " + d.FriendlyName); } catch { rep.AppendLine("  Название: не удалось получить"); }
+            try { rep.AppendLine("  Устройство: " + d.DeviceFriendlyName); } catch { }
+            rep.AppendLine("  Состояние: " + d.State);
+            rep.AppendLine("  Главное (по умолчанию): " + (d.ID == defConsole ? "ДА" : "нет"));
+            rep.AppendLine("  Для связи (по умолчанию): " + (d.ID == defComm ? "ДА" : "нет"));
+            if (d.State == DeviceState.Active)
+            {
+                try { rep.AppendLine("  Заглушен (Mute): " + (d.AudioEndpointVolume.Mute ? "ДА" : "нет")); } catch (Exception ex) { rep.AppendLine("  Заглушен: ошибка " + ex.Message); }
+                try { rep.AppendLine("  Громкость: " + Math.Round(d.AudioEndpointVolume.MasterVolumeLevelScalar * 100) + " %"); } catch { }
+                if (peaks.ContainsKey(d.ID)) rep.AppendLine("  Уровень сигнала за 2 с (0 тишина, 1 максимум): " + Math.Round(peaks[d.ID], 3));
+            }
+            rep.AppendLine("  Код: " + d.ID);
+            rep.AppendLine();
+        }
+    }
+    catch (Exception ex)
+    {
+        rep.AppendLine("Ошибка при чтении микрофонов: " + ex.Message);
+        rep.AppendLine();
+    }
+
+    rep.AppendLine("=== Радиомодули (Bluetooth, Wi-Fi) ===");
+    try
+    {
+        var rs = Radio.GetRadiosAsync().AsTask().GetAwaiter().GetResult();
+        if (rs.Count == 0) rep.AppendLine("Не найдено ни одного.");
+        foreach (var r in rs) rep.AppendLine(r.Kind + ": " + r.Name + ", состояние " + r.State);
+    }
+    catch (Exception ex)
+    {
+        rep.AppendLine("Ошибка при чтении радиомодулей: " + ex.Message);
+    }
+
+    var repPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "OneClickSwitcher-diag.txt");
+    File.WriteAllText(repPath, rep.ToString(), new System.Text.UTF8Encoding(true));
+    try { Process.Start(new ProcessStartInfo("notepad.exe", "\"" + repPath + "\"") { UseShellExecute = true }); } catch { }
+    return;
+}
+
 // ===== Действия без состояния: --action имя (блокировка, сон, выключение, перезагрузка) =====
 int aIdx = Array.IndexOf(args, "--action");
 if (aIdx >= 0 && aIdx + 1 < args.Length)
@@ -60,8 +144,9 @@ var switches = new Dictionary<string, (string Name, Func<Task<int>> Toggle, Func
     ["sound"] = ("Звук", () => Task.FromResult(ToggleSound()), () => Task.FromResult(GetSoundState())),
 };
 
-// ===== Плашка «Статус»: --status показывает состояние всех выключателей на 5 секунд =====
-// Повторный запуск (ещё один клик по ярлыку) закрывает плашку, а не открывает вторую
+// ===== Окно «Статус»: --status показывает все функции с переключателями и кнопками действий =====
+// Повторный запуск (ещё один клик по ярлыку) закрывает окно, а не открывает второе
+SoundPlayer? statusClick = null;   // держим ссылку на звук щелчка, пока он играет
 if (args.Contains("--status"))
 {
     // Одна копия: вторая просит первую закрыться и сразу выходит
@@ -74,76 +159,33 @@ if (args.Contains("--status"))
     }
     var statusStarted = DateTime.Now;
 
-    var rows = new List<(string Key, string Name, int State)>();
-    foreach (var kv in switches)
-        rows.Add((kv.Key, kv.Value.Name, kv.Value.GetState().GetAwaiter().GetResult()));
+    // Состояния узнаём заранее, до создания окна: так проще и надёжнее
+    var statusKeys = new[] { "bluetooth", "wifi", "mic", "sound" };
+    var statusStates = statusKeys.Select(k => switches[k].GetState().GetAwaiter().GetResult()).ToArray();
 
-    // Размеры в пикселях умножаются на масштаб экрана: Ui.S(...)
-    var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
-    int rowH = Ui.S(54);
-    int pad = Ui.S(10);
-    var panel = new OsdForm
-    {
-        FormBorderStyle = FormBorderStyle.None,
-        StartPosition = FormStartPosition.Manual,
-        ShowInTaskbar = false,
-        TopMost = true,
-        BackColor = Theme.Card,
-        Size = new Size(Ui.S(360), pad * 2 + rows.Count * rowH),
-        Opacity = 0.97
-    };
-    panel.Location = new Point(wa.Left + (wa.Width - panel.Width) / 2, wa.Bottom - panel.Height - Ui.S(48));
-
-    panel.Paint += (s, e) =>
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        Ui.DrawCardBorder(g, panel.ClientSize);
-        using var nameFont = Ui.MakeFont("Segoe UI", 20);
-        using var stateFont = Ui.MakeFont("Segoe UI", 20, FontStyle.Bold);
-        for (int i = 0; i < rows.Count; i++)
-        {
-            float y = pad + i * rowH;
-            int st = rows[i].State;
-            var (col, tint) = Theme.State(st);
-            // Значок функции в цветной плитке: серый и перечёркнутый, если выключено
-            var tile = new RectangleF(pad + Ui.S(14), y + (rowH - Ui.S(36)) / 2f, Ui.S(36), Ui.S(36));
-            Ui.DrawTile(g, tile, Ui.F(9), tint, rows[i].Key, col, st == 0, 1.9, 0.62f);
-            float tx = tile.Right + Ui.S(14);
-            Ui.DrawText(g, rows[i].Name, nameFont, Theme.Text,
-                new RectangleF(tx, y, panel.Width - tx - Ui.S(130), rowH));
-            string txt = st == 1 ? "вкл" : st == 0 ? "выкл" : "нет";
-            Ui.DrawText(g, txt, stateFont, col,
-                new RectangleF(panel.Width - pad - Ui.S(14) - Ui.S(110), y, Ui.S(110), rowH), StringAlignment.Far);
-        }
-    };
-    panel.Click += (s, e) => panel.Close();
-
-    var statusTimer = new System.Windows.Forms.Timer { Interval = 5000 };
-    statusTimer.Tick += (s, e) => panel.Close();
-    statusTimer.Start();
+    var statusForm = new StatusForm(switches, statusStates, PlayClick);
 
     // Фоновый «слушатель»: ждёт сигнала «закрой» от второй копии программы
-    _ = panel.Handle;
-    statusCloseEvent.Reset();   // клики, пришедшие, пока плашка ещё готовилась, не считаем
+    _ = statusForm.Handle;
+    statusCloseEvent.Reset();   // клики, пришедшие, пока окно ещё готовилось, не считаем
     var statusWaiter = new Thread(() =>
     {
         while (true)
         {
             statusCloseEvent.WaitOne();
-            panel.BeginInvoke(new Action(() =>
+            statusForm.BeginInvoke(new Action(() =>
             {
-                // Время двойного щелчка Windows игнорируем: так случайный двойной клик не закроет плашку
+                // Время двойного щелчка Windows игнорируем: так случайный двойной клик не закроет окно
                 if ((DateTime.Now - statusStarted).TotalMilliseconds < SystemInformation.DoubleClickTime) return;
-                panel.Close();
+                statusForm.Close();
             }));
         }
     })
     { IsBackground = true };
     statusWaiter.Start();
 
-    Application.Run(panel);
+    Application.Run(statusForm);
+    GC.KeepAlive(statusClick);
     return;
 }
 
@@ -402,6 +444,23 @@ MemoryStream ToWav(List<short> samples)
     return stream;
 }
 
+// ===== Щелчок для окна «Статус»: тот же звук, что у плашки, но без плашки =====
+void PlayClick(int st)
+{
+    var smp = new List<short>();
+    AddSilence(smp, 20);
+    if (st == 1) AddClick(smp, 2600, 220, 0.45);
+    else if (st == 0) AddClick(smp, 1500, 130, 0.45);
+    else
+    {
+        AddClick(smp, 700, 90, 0.5);
+        AddSilence(smp, 110);
+        AddClick(smp, 700, 90, 0.5);
+    }
+    statusClick = new SoundPlayer(ToWav(smp));
+    statusClick.Play();
+}
+
 // ===== Выполняем действие =====
 int result = sw.Toggle().GetAwaiter().GetResult();
 
@@ -575,6 +634,11 @@ static class Theme
     public static Color Note => Pick(0xe9ebf0, 0x2f3139);
     public static Color Primary => Pick(0x0a5cb8, 0x2f6fc8);
     public static Color Tile => C(0x2f3b52);   // плитка значка ярлыка
+    public static Color RowHover => Pick(0xeef1f6, 0x40434d);   // подсветка строки и кнопок под мышью
+    public static Color TrackOn => Pick(0x0a5cb8, 0x7db8ff);    // переключатель: дорожка и ползунок
+    public static Color TrackOff => Pick(0x8a91a0, 0x6b7080);
+    public static Color KnobOn => Pick(0xffffff, 0x16181d);
+    public static Color KnobOff => Pick(0xffffff, 0xd5d9e2);
 
     // Цвет значка и фона плитки для состояния: 1 = включено, 0 = выключено, иначе ошибка
     public static (Color Fg, Color Bg) State(int st)
@@ -826,6 +890,16 @@ static class Shortcuts
         return target;
     }
 
+    // Есть ли уже на рабочем столе ярлык этой функции
+    public static bool Exists(string key)
+    {
+        foreach (var item in All)
+            if (item.Key == key)
+                return File.Exists(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), item.Title + ".lnk"));
+        return false;
+    }
+
     // Создаёт ярлыки на программу exe. Возвращает, сколько ярлыков создано
     public static int CreateOnDesktop(IEnumerable<string> keys, string exe)
     {
@@ -886,6 +960,7 @@ class CheckRow : Control
     public string Key = "";
     public string Title = "";
     public bool Checked;
+    public string Note = "";   // например, «уже есть»
 
     public CheckRow()
     {
@@ -964,7 +1039,13 @@ class CheckRow : Control
         var tile = new RectangleF(cx + cb + Ui.F(12), (Height - t) / 2f, t, t);
         Ui.DrawTile(g, tile, Ui.F(8), Theme.Tile, Key, Color.White, false, 2.2, 0.60f);
         using var font = Ui.MakeFont("Segoe UI", 17);
-        Ui.DrawText(g, Title, font, Theme.Text, new RectangleF(tile.Right + Ui.F(12), 0, Width - tile.Right - Ui.F(16), Height));
+        float noteW = Note == "" ? 0 : Ui.F(70);
+        Ui.DrawText(g, Title, font, Theme.Text, new RectangleF(tile.Right + Ui.F(12), 0, Width - tile.Right - Ui.F(16) - noteW, Height));
+        if (Note != "")
+        {
+            using var noteFont = Ui.MakeFont("Segoe UI", 13);
+            Ui.DrawText(g, Note, noteFont, Theme.Sub, new RectangleF(Width - Ui.F(12) - noteW, 0, noteW, Height), StringAlignment.Far);
+        }
     }
 }
 
@@ -1013,8 +1094,9 @@ class FirstRunForm : Form
             {
                 Key = item.Key,
                 Title = item.Title,
-                // Выключение и перезагрузка по умолчанию не отмечены
-                Checked = item.Key != "shutdown" && item.Key != "restart",
+                // Выключение и перезагрузка по умолчанию не отмечены; ярлыки, которые уже есть на столе, тоже
+                Checked = item.Key != "shutdown" && item.Key != "restart" && !Shortcuts.Exists(item.Key),
+                Note = Shortcuts.Exists(item.Key) ? "уже есть" : "",
                 Location = new Point(Ui.S(24 + (i % 2) * 320), Ui.S(126 + (i / 2) * 50)),
                 Size = new Size(Ui.S(312), Ui.S(44))
             };
@@ -1169,6 +1251,362 @@ class FirstRunForm : Form
         b.FlatAppearance.BorderColor = primary ? Theme.Primary : Theme.BtnLine;
         Controls.Add(b);
         return b;
+    }
+}
+
+// Окно «Статус»: все функции с переключателями, кнопки действий и ссылка на создание ярлыков
+class StatusForm : RoundForm
+{
+    readonly Dictionary<string, (string Name, Func<Task<int>> Toggle, Func<Task<int>> GetState)> sw;
+    readonly Action<int> playClick;
+    static readonly string[] FuncKeys = { "bluetooth", "wifi", "mic", "sound" };
+    static readonly (string Key, string Title, string Args)[] Actions =
+    {
+        ("lock", "Блокировка", "--action lock"),
+        ("sleep", "Сон", "--action sleep"),
+        ("shutdown", "Выключить", "--action shutdown"),
+        ("restart", "Перезагрузка", "--action restart"),
+    };
+
+    readonly int[] state;                       // 1 = включено, 0 = выключено, -1 = нет устройства
+    readonly bool[] busy = new bool[4];         // функция сейчас переключается
+    readonly bool[] existed = new bool[4];      // ярлык уже лежал на рабочем столе
+    readonly bool[] created = new bool[4];      // ярлык создан из этого окна
+    readonly string?[] rowMsg = new string?[4]; // короткое сообщение об ошибке в строке
+    readonly DateTime[] rowMsgUntil = new DateTime[4];
+
+    int hoverRow = -1, hoverAction = -1;
+    bool hoverLink, hoverChip;
+    bool closeAfter;                            // закрыть, как только закончится переключение
+    DateTime lastInside = DateTime.Now;         // когда мышь последний раз была над окном
+    readonly System.Windows.Forms.Timer watch = new() { Interval = 250 };
+
+    public StatusForm(Dictionary<string, (string Name, Func<Task<int>> Toggle, Func<Task<int>> GetState)> switches,
+        int[] states, Action<int> click)
+    {
+        sw = switches;
+        state = states;
+        playClick = click;
+
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        ShowInTaskbar = false;
+        TopMost = true;
+        BackColor = Theme.Card;
+        Opacity = 0.97;
+        Size = new Size(Ui.S(400), Ui.S(421));
+        var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+        Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - Ui.S(48));
+
+        for (int i = 0; i < 4; i++) existed[i] = Shortcuts.Exists(FuncKeys[i]);
+
+        watch.Tick += (s, e) => Watch();
+        watch.Start();
+    }
+
+    // ----- Положение элементов (в пикселях эскиза, масштаб добавляется сам) -----
+    Rectangle RowRect(int i) => new Rectangle(Ui.S(8), Ui.S(8) + i * Ui.S(54), Ui.S(384), Ui.S(54));
+    Rectangle SwitchRect(int i) => new Rectangle(Ui.S(330), RowRect(i).Y + Ui.S(13), Ui.S(48), Ui.S(28));
+    Rectangle ChipRect(int i) => new Rectangle(Ui.S(236), RowRect(i).Y + Ui.S(11), Ui.S(78), Ui.S(32));
+    Rectangle ActionRect(int i) => new Rectangle(Ui.S(16) + i * Ui.S(94), Ui.S(271), Ui.S(86), Ui.S(76));
+    Rectangle LinkRect => new Rectangle(Ui.S(8), Ui.S(366), Ui.S(384), Ui.S(44));
+
+    // Кнопка «ярлык» показывается, если устройство есть и ярлыка ещё нет
+    bool ChipVisible(int i) => state[i] != -1 && !created[i] && !existed[i];
+
+    // ----- Рисование -----
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        Ui.DrawCardBorder(g, ClientSize);
+
+        using var nameFont = Ui.MakeFont("Segoe UI", 20);
+        using var chipFont = Ui.MakeFont("Segoe UI Semibold", 15);
+        using var noFont = Ui.MakeFont("Segoe UI", 18, FontStyle.Bold);
+        using var capFont = Ui.MakeFont("Segoe UI Semibold", 12);
+        using var actFont = Ui.MakeFont("Segoe UI", 12);
+        using var linkFont = Ui.MakeFont("Segoe UI Semibold", 17);
+
+        for (int i = 0; i < 4; i++)
+        {
+            var r = RowRect(i);
+            int st = state[i];
+
+            if (i == hoverRow)
+            {
+                using var path = Shapes.Round(r, Ui.F(8));
+                using var fill = new SolidBrush(Theme.RowHover);
+                g.FillPath(fill, path);
+            }
+
+            // Значок функции в цветной плитке: серый и перечёркнутый, если выключено
+            var (col, tint) = Theme.State(st);
+            var tile = new RectangleF(r.X + Ui.S(14), r.Y + (r.Height - Ui.S(36)) / 2f, Ui.S(36), Ui.S(36));
+            Ui.DrawTile(g, tile, Ui.F(9), tint, FuncKeys[i], col, st == 0, 1.9, 0.62f);
+            float tx = tile.Right + Ui.S(12);
+            Ui.DrawText(g, sw[FuncKeys[i]].Name, nameFont, Theme.Text,
+                new RectangleF(tx, r.Y, Ui.S(236) - tx - Ui.S(6), r.Height));
+
+            // Сообщение об ошибке, кнопка «ярлык» или отметка «есть» (только когда мышь над строкой)
+            if (rowMsg[i] != null && DateTime.Now < rowMsgUntil[i])
+            {
+                Ui.DrawText(g, rowMsg[i]!, chipFont, Theme.Bad,
+                    new RectangleF(Ui.S(176), r.Y, Ui.S(138), r.Height), StringAlignment.Far);
+            }
+            else if (i == hoverRow && st != -1)
+            {
+                if (ChipVisible(i))
+                {
+                    var c = ChipRect(i);
+                    using var path = Shapes.Round(c, Ui.F(8));
+                    using var fill = new SolidBrush(hoverChip ? Theme.Row : Theme.Btn);
+                    g.FillPath(fill, path);
+                    using var border = new Pen(Theme.BtnLine);
+                    g.DrawPath(border, path);
+                    Ui.DrawText(g, "ярлык", chipFont, Theme.Text, c, StringAlignment.Center);
+                }
+                else
+                {
+                    Color c2 = created[i] ? Theme.On : Theme.Sub;
+                    string word = created[i] ? "создан" : "есть";
+                    Ui.DrawText(g, word, chipFont, c2,
+                        new RectangleF(Ui.S(246), r.Y, Ui.S(68), r.Height), StringAlignment.Far);
+                    float cy = r.Y + r.Height / 2f;
+                    float x0 = Ui.S(314) - Ui.S(24) - (created[i] ? Ui.S(50) : Ui.S(34));
+                    using var tick = new Pen(c2, Ui.F(2.2)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+                    g.DrawLines(tick, new[]
+                    {
+                        new PointF(x0, cy),
+                        new PointF(x0 + Ui.F(5), cy + Ui.F(5)),
+                        new PointF(x0 + Ui.F(14), cy - Ui.F(5))
+                    });
+                }
+            }
+
+            // Справа переключатель или «нет», если устройства нет
+            if (st == -1)
+                Ui.DrawText(g, "нет", noFont, Theme.Bad, new RectangleF(Ui.S(300), r.Y, Ui.S(78), r.Height), StringAlignment.Far);
+            else
+                DrawSwitch(g, SwitchRect(i), st == 1, busy[i]);
+        }
+
+        // Разделитель и ряд действий
+        using (var line = new Pen(Theme.Line))
+        {
+            g.DrawLine(line, Ui.S(16), Ui.S(232), Width - Ui.S(16), Ui.S(232));
+            g.DrawLine(line, Ui.S(16), Ui.S(359), Width - Ui.S(16), Ui.S(359));
+        }
+        Ui.DrawText(g, "ДЕЙСТВИЯ", capFont, Theme.Sub, new RectangleF(Ui.S(16), Ui.S(242), Ui.S(200), Ui.S(22)));
+
+        for (int i = 0; i < 4; i++)
+        {
+            var r = ActionRect(i);
+            using (var path = Shapes.Round(r, Ui.F(10)))
+            {
+                using var fill = new SolidBrush(i == hoverAction ? Theme.RowHover : Theme.Btn);
+                g.FillPath(fill, path);
+                using var border = new Pen(Theme.BtnLine);
+                g.DrawPath(border, path);
+            }
+            float gs = Ui.F(26);
+            var box = new RectangleF(r.X + (r.Width - gs) / 2f, r.Y + Ui.S(14), gs, gs);
+            Glyphs.Draw(g, Actions[i].Key, box, Theme.Text, 1.9, false);
+            Ui.DrawText(g, Actions[i].Title, actFont, Theme.Text,
+                new RectangleF(r.X, box.Bottom + Ui.S(4), r.Width, Ui.S(20)), StringAlignment.Center);
+        }
+
+        // Ссылка «Создать ярлыки…»
+        if (hoverLink)
+        {
+            using var path = Shapes.Round(LinkRect, Ui.F(8));
+            using var fill = new SolidBrush(Theme.RowHover);
+            g.FillPath(fill, path);
+        }
+        Ui.DrawText(g, "Создать ярлыки…", linkFont, Theme.On, new RectangleF(Ui.S(20), Ui.S(366), Ui.S(360), Ui.S(44)));
+    }
+
+    // Переключатель: дорожка и круглый ползунок. Пока функция переключается, рисуется бледнее
+    static void DrawSwitch(Graphics g, Rectangle r, bool on, bool dim)
+    {
+        var track = on ? Theme.TrackOn : Theme.TrackOff;
+        var knob = on ? Theme.KnobOn : Theme.KnobOff;
+        if (dim)
+        {
+            track = Color.FromArgb(110, track);
+            knob = Color.FromArgb(150, knob);
+        }
+        using (var path = Shapes.Round(r, r.Height / 2f))
+        using (var fill = new SolidBrush(track))
+            g.FillPath(fill, path);
+        int d = r.Height - 2 * Ui.S(3);
+        int kx = on ? r.Right - Ui.S(3) - d : r.X + Ui.S(3);
+        using var kb = new SolidBrush(knob);
+        g.FillEllipse(kb, kx, r.Y + Ui.S(3), d, d);
+    }
+
+    // ----- Мышь -----
+    void UpdateHover(Point p)
+    {
+        int row = -1, act = -1;
+        bool link = false, chip = false;
+        for (int i = 0; i < 4; i++)
+            if (RowRect(i).Contains(p)) { row = i; break; }
+        if (row >= 0 && ChipVisible(row) && ChipRect(row).Contains(p)) chip = true;
+        for (int i = 0; i < 4; i++)
+            if (ActionRect(i).Contains(p)) act = i;
+        if (LinkRect.Contains(p)) link = true;
+
+        if (row != hoverRow || act != hoverAction || link != hoverLink || chip != hoverChip)
+        {
+            hoverRow = row; hoverAction = act; hoverLink = link; hoverChip = chip;
+            Invalidate();
+        }
+        Cursor = (row >= 0 && state[row] != -1) || act >= 0 || link ? Cursors.Hand : Cursors.Default;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        UpdateHover(e.Location);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        hoverRow = -1; hoverAction = -1; hoverLink = false; hoverChip = false;
+        Cursor = Cursors.Default;
+        Invalidate();
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        base.OnMouseClick(e);
+        if (e.Button != MouseButtons.Left) return;
+        var p = e.Location;
+
+        for (int i = 0; i < 4; i++)
+        {
+            if (!RowRect(i).Contains(p)) continue;
+            if (ChipVisible(i) && ChipRect(i).Contains(p)) MakeShortcut(i);
+            else if (state[i] != -1 && !busy[i]) ToggleRow(i);
+            return;
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            if (ActionRect(i).Contains(p)) { Launch(Actions[i].Args); return; }
+        }
+        if (LinkRect.Contains(p)) { Launch("--setup"); return; }
+
+        Close();   // щелчок мимо строк и кнопок закрывает окно
+    }
+
+    // ----- Действия -----
+    // Переключаем функцию на месте: окно остаётся, строка обновляется
+    async void ToggleRow(int i)
+    {
+        busy[i] = true;
+        Invalidate();
+        int r;
+        try { r = await sw[FuncKeys[i]].Toggle(); }
+        catch { r = -2; }
+        busy[i] = false;
+        if (IsDisposed) return;
+
+        if (r == 1 || r == 0) state[i] = r;
+        else if (r == -1) state[i] = -1;
+        else Msg(i, "не удалось");
+        playClick(r);
+        Invalidate();
+        if (closeAfter) Close();
+    }
+
+    // Ярлык этой функции на рабочий стол
+    void MakeShortcut(int i)
+    {
+        try
+        {
+            string exe = Shortcuts.Install(out _);
+            int n = Shortcuts.CreateOnDesktop(new[] { FuncKeys[i] }, exe);
+            if (n > 0)
+            {
+                created[i] = true;
+                playClick(1);
+            }
+            else Msg(i, "не удалось");
+        }
+        catch { Msg(i, "не удалось"); }
+        Invalidate();
+    }
+
+    void Msg(int i, string text)
+    {
+        rowMsg[i] = text;
+        rowMsgUntil[i] = DateTime.Now.AddSeconds(2);
+    }
+
+    // Запускаем программу с другими параметрами (действие или окно создания ярлыков) и закрываем это окно
+    void Launch(string args)
+    {
+        try
+        {
+            string? exe = Environment.ProcessPath;
+            if (exe != null) Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false });
+        }
+        catch { }
+        Close();
+    }
+
+    // Пока мышь над окном, оно остаётся. Ушла мышь: закрываем через 5 секунд
+    void Watch()
+    {
+        if (busy.Any(b => b) || Bounds.Contains(Cursor.Position)) lastInside = DateTime.Now;
+        else if ((DateTime.Now - lastInside).TotalMilliseconds > 5000)
+        {
+            Close();
+            return;
+        }
+
+        bool changed = false;
+        for (int i = 0; i < 4; i++)
+            if (rowMsg[i] != null && DateTime.Now >= rowMsgUntil[i]) { rowMsg[i] = null; changed = true; }
+        if (changed) Invalidate();
+    }
+
+    // ----- Окно: выход по Esc, без прерывания переключения -----
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        lastInside = DateTime.Now;
+        Activate();
+    }
+
+    protected override bool ProcessCmdKey(ref Message m, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            Close();
+            return true;
+        }
+        return base.ProcessCmdKey(ref m, keyData);
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // Если Bluetooth или Wi-Fi прямо сейчас переключается, ждём окончания, иначе переключение оборвётся
+        if (busy.Any(b => b))
+        {
+            closeAfter = true;
+            e.Cancel = true;
+        }
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        watch.Stop();
+        base.OnFormClosed(e);
     }
 }
 
