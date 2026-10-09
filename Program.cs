@@ -984,7 +984,8 @@ class CheckRow : Control
     public string Key = "";
     public string Title = "";
     public bool Checked;
-    public string Note = "";   // например, «уже есть»
+    public string Note = "";   // надпись справа, например «установлен»
+    public bool Installed;     // ярлык уже на рабочем столе: строка неактивна
 
     public CheckRow()
     {
@@ -997,6 +998,7 @@ class CheckRow : Control
     protected override void OnClick(EventArgs e)
     {
         base.OnClick(e);
+        if (Installed) return;   // установленный ярлык не переключается
         Checked = !Checked;
         Focus();
         Invalidate();
@@ -1005,7 +1007,7 @@ class CheckRow : Control
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
-        if (e.KeyCode == Keys.Space)
+        if (e.KeyCode == Keys.Space && !Installed)
         {
             Checked = !Checked;
             Invalidate();
@@ -1027,7 +1029,7 @@ class CheckRow : Control
         var rect = new RectangleF(1f, 1f, Width - 2f, Height - 2f);
         using (var path = Shapes.Round(rect, Ui.F(10)))
         {
-            using var fill = new SolidBrush(Theme.Row);
+            using var fill = new SolidBrush(Installed ? Theme.Note : Theme.Row);
             g.FillPath(fill, path);
             using var border = new Pen(Focused ? Theme.On : Theme.Line, Focused ? 2f : 1f);
             g.DrawPath(border, path);
@@ -1063,12 +1065,14 @@ class CheckRow : Control
         var tile = new RectangleF(cx + cb + Ui.F(12), (Height - t) / 2f, t, t);
         Ui.DrawTile(g, tile, Ui.F(8), Theme.Tile, Key, Color.White, false, 2.2, 0.60f);
         using var font = Ui.MakeFont("Segoe UI", 17);
-        float noteW = Note == "" ? 0 : Ui.F(70);
-        Ui.DrawText(g, Title, font, Theme.Text, new RectangleF(tile.Right + Ui.F(12), 0, Width - tile.Right - Ui.F(16) - noteW, Height));
+        float noteW = Note == "" ? 0 : Ui.F(Installed ? 88 : 70);
+        Ui.DrawText(g, Title, font, Installed ? Theme.Sub : Theme.Text,
+            new RectangleF(tile.Right + Ui.F(12), 0, Width - tile.Right - Ui.F(16) - noteW, Height));
         if (Note != "")
         {
-            using var noteFont = Ui.MakeFont("Segoe UI", 13);
-            Ui.DrawText(g, Note, noteFont, Theme.Sub, new RectangleF(Width - Ui.F(12) - noteW, 0, noteW, Height), StringAlignment.Far);
+            using var noteFont = Ui.MakeFont("Segoe UI Semibold", 13);
+            Ui.DrawText(g, Note, noteFont, Installed ? Theme.On : Theme.Sub,
+                new RectangleF(Width - Ui.F(12) - noteW, 0, noteW, Height), StringAlignment.Far);
         }
     }
 }
@@ -1110,7 +1114,7 @@ class FirstRunForm : Form
         var step1 = new List<Control>();
         step1.Add(AddLabel("1. Какие ярлыки создать на рабочем столе", 24, 92, 632, 26, 17, "Segoe UI Semibold"));
         var rows = new List<CheckRow>();
-        string[] order = { "bluetooth", "wifi", "mic", "sound", "lock", "sleep", "status", "shutdown", "restart" };
+        string[] order = { "status", "bluetooth", "wifi", "mic", "sound", "lock", "sleep", "shutdown", "restart" };
         for (int i = 0; i < order.Length; i++)
         {
             var item = Shortcuts.All.First(a => a.Key == order[i]);
@@ -1118,17 +1122,24 @@ class FirstRunForm : Form
             {
                 Key = item.Key,
                 Title = item.Title,
-                // Выключение и перезагрузка по умолчанию не отмечены; ярлыки, которые уже есть на столе, тоже
-                Checked = item.Key != "shutdown" && item.Key != "restart" && !Shortcuts.Exists(item.Key),
-                Note = Shortcuts.Exists(item.Key) ? "уже есть" : "",
+                // По умолчанию отмечен только «Статус»; остальное человек выбирает сам.
+                // Ярлыки, которые уже лежат на столе, отмечены и недоступны
+                Installed = Shortcuts.Exists(item.Key),
+                Checked = Shortcuts.Exists(item.Key) || item.Key == "status",
+                Note = Shortcuts.Exists(item.Key) ? "установлен" : "",
                 Location = new Point(Ui.S(24 + (i % 2) * 320), Ui.S(126 + (i / 2) * 50)),
                 Size = new Size(Ui.S(312), Ui.S(44))
             };
+            if (row.Installed)
+            {
+                row.Cursor = Cursors.Default;
+                row.TabStop = false;
+            }
             rows.Add(row);
             step1.Add(row);
             Controls.Add(row);
         }
-        step1.Add(AddLabel("Выключение и перезагрузка по умолчанию не отмечены: отметьте их, если они нужны.",
+        step1.Add(AddLabel("«Статус» открывает окно со всеми функциями.",
             24, 376, 632, 22, 14, color: Theme.Sub));
 
         // Шаг 2: закрепление на панели задач
@@ -1163,7 +1174,7 @@ class FirstRunForm : Form
         close.Click += (s, e) => Close();
         create.Click += (s, e) =>
         {
-            var chosen = rows.Where(r => r.Checked).Select(r => r.Key).ToList();
+            var chosen = rows.Where(r => r.Checked && !r.Installed).Select(r => r.Key).ToList();
             if (chosen.Count == 0)
             {
                 result.ForeColor = Theme.Sub;
@@ -1205,7 +1216,6 @@ class FirstRunForm : Form
             Beeper.Play(0.35, (659.0, 100), (880.0, 180));
             foreach (var c in step1) c.Visible = false;
             create.Visible = false;
-            result.Visible = false;
 
             Controls.Add(new GlyphBox
             {
@@ -1216,17 +1226,22 @@ class FirstRunForm : Form
                 Size = new Size(Ui.S(56), Ui.S(56))
             });
             AddLabel("Готово: ярлыки созданы", 96, 98, 560, 34, 24, "Segoe UI Semibold");
-            AddLabel("Создано ярлыков: " + n + ". Они лежат на рабочем столе. Установка закончена, окно можно закрыть.",
-                96, 134, 560, 48, 16, color: Theme.Sub);
+            AddLabel("Создано ярлыков: " + n + ". Они лежат на рабочем столе.",
+                96, 134, 560, 26, 16, color: Theme.Sub);
+            AddLabel("Осталось закрепить нужные ярлыки на панели задач. Как это сделать, написано ниже.",
+                24, 170, 632, 48, 16, "Segoe UI Semibold");
             AddLabel(copied
                     ? "Программа скопирована в папку " + Shortcuts.InstallDir + ". Файл, который вы запускали, теперь можно удалить."
                     : "Программа уже работает из своей постоянной папки: " + Shortcuts.InstallDir + ".",
-                24, 188, 632, 44, 15, color: Theme.Sub);
-            AddLabel("Осталось закрепить нужные ярлыки на панели задач. Как это сделать, написано ниже.",
-                24, 236, 632, 26, 16);
+                24, 222, 632, 64, 15, color: Theme.Sub);
+
+            // Сообщение «окно можно закрыть» читается в самом конце, рядом с кнопкой «Закрыть»
+            result.ForeColor = Theme.On;
+            result.Text = "Установка закончена. Окно можно закрыть.";
+            result.Visible = true;
 
             // Остальное поднимаем вверх на место выбора ярлыков
-            int delta = Ui.S(408 - 276);
+            int delta = Ui.S(408 - 296);
             foreach (var c in lower) c.Top -= delta;
             close.Left = Ui.S(656) - close.Width;     // кнопка «Закрыть» становится главной и правее
             close.BackColor = Theme.Primary;
@@ -1236,7 +1251,18 @@ class FirstRunForm : Form
             AutoScrollMinSize = new Size(0, newFull);
             ClientSize = new Size(ClientSize.Width, Math.Min(newFull, ClientSize.Height));
         };
-        AcceptButton = create;
+        // Все ярлыки уже на рабочем столе: кнопка создания не нужна
+        if (rows.All(r => r.Installed))
+        {
+            create.Visible = false;
+            result.ForeColor = Theme.On;
+            result.Text = "Все ярлыки установлены.";
+            close.Left = Ui.S(656) - close.Width;
+            close.BackColor = Theme.Primary;
+            close.ForeColor = Color.White;
+            close.FlatAppearance.BorderColor = Theme.Primary;
+        }
+        AcceptButton = create.Visible ? create : close;
         CancelButton = close;
     }
 
@@ -1320,7 +1346,10 @@ class StatusForm : RoundForm
         TopMost = true;
         BackColor = Theme.Card;
         Opacity = 0.97;
-        Size = new Size(Ui.S(400), Ui.S(421));
+        // Ссылка «Создать ярлыки…» нужна, только пока какого-то ярлыка ещё нет
+        showLink = new[] { "status", "bluetooth", "wifi", "mic", "sound", "lock", "sleep", "shutdown", "restart" }
+            .Any(k => !Shortcuts.Exists(k));
+        Size = new Size(Ui.S(400), Ui.S(showLink ? 421 : 366));
         var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
         Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - Ui.S(48));
 
@@ -1342,7 +1371,8 @@ class StatusForm : RoundForm
     Rectangle SwitchRect(int i) => new Rectangle(Ui.S(330), RowRect(i).Y + Ui.S(13), Ui.S(48), Ui.S(28));
     Rectangle ChipRect(int i) => new Rectangle(Ui.S(236), RowRect(i).Y + Ui.S(11), Ui.S(78), Ui.S(32));
     Rectangle ActionRect(int i) => new Rectangle(Ui.S(16) + i * Ui.S(94), Ui.S(271), Ui.S(86), Ui.S(76));
-    Rectangle LinkRect => new Rectangle(Ui.S(8), Ui.S(366), Ui.S(384), Ui.S(44));
+    readonly bool showLink;
+    Rectangle LinkRect => showLink ? new Rectangle(Ui.S(8), Ui.S(366), Ui.S(384), Ui.S(44)) : Rectangle.Empty;
 
     // Кнопка «ярлык» показывается, если устройство есть и ярлыка ещё нет
     bool ChipVisible(int i) => state[i] != -1 && !created[i] && !existed[i];
@@ -1429,7 +1459,7 @@ class StatusForm : RoundForm
         using (var line = new Pen(Theme.Line))
         {
             g.DrawLine(line, Ui.S(16), Ui.S(232), Width - Ui.S(16), Ui.S(232));
-            g.DrawLine(line, Ui.S(16), Ui.S(359), Width - Ui.S(16), Ui.S(359));
+            if (showLink) g.DrawLine(line, Ui.S(16), Ui.S(359), Width - Ui.S(16), Ui.S(359));
         }
         Ui.DrawText(g, "ДЕЙСТВИЯ", capFont, Theme.Sub, new RectangleF(Ui.S(16), Ui.S(242), Ui.S(200), Ui.S(22)));
 
@@ -1457,7 +1487,8 @@ class StatusForm : RoundForm
             using var fill = new SolidBrush(Theme.RowHover);
             g.FillPath(fill, path);
         }
-        Ui.DrawText(g, "Создать ярлыки…", linkFont, Theme.On, new RectangleF(Ui.S(20), Ui.S(366), Ui.S(360), Ui.S(44)));
+        if (showLink)
+            Ui.DrawText(g, "Создать ярлыки…", linkFont, Theme.On, new RectangleF(Ui.S(20), Ui.S(366), Ui.S(360), Ui.S(44)));
     }
 
     // Переключатель: дорожка и круглый ползунок. Пока функция переключается, рисуется бледнее
