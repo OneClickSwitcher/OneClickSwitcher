@@ -81,6 +81,29 @@ if (args.Contains("--diag"))
         rep.AppendLine();
     }
 
+    rep.AppendLine("=== Устройства вывода (динамики, наушники) ===");
+    try
+    {
+        using var enOut = new MMDeviceEnumerator();
+        string defOut = "";
+        try { defOut = enOut.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia).ID; } catch { }
+        foreach (var dev in enOut.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        {
+            rep.AppendLine(dev.FriendlyName + (dev.ID == defOut ? "  [главное]" : ""));
+            try
+            {
+                rep.AppendLine("  Заглушено: " + (dev.AudioEndpointVolume.Mute ? "ДА" : "нет") +
+                    ", громкость " + Math.Round(dev.AudioEndpointVolume.MasterVolumeLevelScalar * 100) + " %");
+            }
+            catch { }
+        }
+    }
+    catch (Exception ex)
+    {
+        rep.AppendLine("Ошибка при чтении устройств вывода: " + ex.Message);
+    }
+    rep.AppendLine();
+
     rep.AppendLine("=== Радиомодули (Bluetooth, Wi-Fi) ===");
     try
     {
@@ -489,6 +512,7 @@ else
 
 var player = new SoundPlayer(ToWav(samples));
 player.Play();
+ActionLog.Write("ярлык: " + key, result);
 
 // ===== Показываем плашку внизу по центру экрана на 1,3 секунды =====
 string glyphKey = key;   // здесь key уже точно не пустой
@@ -1278,8 +1302,10 @@ class StatusForm : RoundForm
     int hoverRow = -1, hoverAction = -1;
     bool hoverLink, hoverChip;
     bool closeAfter;                            // закрыть, как только закончится переключение
+    bool refreshing;                            // идёт обновление состояний
     DateTime lastInside = DateTime.Now;         // когда мышь последний раз была над окном
     readonly System.Windows.Forms.Timer watch = new() { Interval = 250 };
+    readonly System.Windows.Forms.Timer poll = new() { Interval = 1500 };   // как часто заново узнаём состояния
 
     public StatusForm(Dictionary<string, (string Name, Func<Task<int>> Toggle, Func<Task<int>> GetState)> switches,
         int[] states, Action<int> click)
@@ -1302,6 +1328,13 @@ class StatusForm : RoundForm
 
         watch.Tick += (s, e) => Watch();
         watch.Start();
+
+        // Состояния могут меняться без нашего участия (Bluetooth включился, и появился микрофон гарнитуры),
+        // поэтому, пока окно открыто, регулярно читаем их заново
+        poll.Tick += (s, e) => RefreshAll();
+        poll.Start();
+
+        ActionLog.Write("открыто окно статуса", 0);
     }
 
     // ----- Положение элементов (в пикселях эскиза, масштаб добавляется сам) -----
@@ -1463,7 +1496,7 @@ class StatusForm : RoundForm
             hoverRow = row; hoverAction = act; hoverLink = link; hoverChip = chip;
             Invalidate();
         }
-        Cursor = (row >= 0 && state[row] != -1) || act >= 0 || link ? Cursors.Hand : Cursors.Default;
+        Cursor = row >= 0 || act >= 0 || link ? Cursors.Hand : Cursors.Default;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -1491,6 +1524,12 @@ class StatusForm : RoundForm
             if (!RowRect(i).Contains(p)) continue;
             if (ChipVisible(i) && ChipRect(i).Contains(p)) MakeShortcut(i);
             else if (state[i] != -1 && !busy[i]) ToggleRow(i);
+            else if (state[i] == -1)
+            {
+                Msg(i, "не найдено");   // устройства нет: проверяем ещё раз, вдруг уже появилось
+                RefreshAll();
+                Invalidate();
+            }
             return;
         }
         for (int i = 0; i < 4; i++)
@@ -1518,8 +1557,32 @@ class StatusForm : RoundForm
         else if (r == -1) state[i] = -1;
         else Msg(i, "не удалось");
         playClick(r);
+        ActionLog.Write("окно статуса: " + FuncKeys[i], r);
         Invalidate();
-        if (closeAfter) Close();
+        if (closeAfter) { Close(); return; }
+        RefreshAll();   // переключение одной функции могло изменить другую (например, Bluetooth и микрофон гарнитуры)
+    }
+
+    // Заново читаем состояния всех строк и перерисовываем, если что-то изменилось
+    async void RefreshAll()
+    {
+        if (refreshing || busy.Any(b => b)) return;
+        refreshing = true;
+        try
+        {
+            bool changed = false;
+            for (int i = 0; i < 4; i++)
+            {
+                int r;
+                try { r = await sw[FuncKeys[i]].GetState(); }
+                catch { r = -1; }
+                if (IsDisposed) return;
+                if (busy[i]) continue;
+                if (r != state[i]) { state[i] = r; changed = true; }
+            }
+            if (changed) Invalidate();
+        }
+        finally { refreshing = false; }
     }
 
     // Ярлык этой функции на рабочий стол
@@ -1606,7 +1669,42 @@ class StatusForm : RoundForm
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         watch.Stop();
+        poll.Stop();
         base.OnFormClosed(e);
+    }
+}
+
+// Небольшой журнал действий на вашем компьютере: что нажали, чем кончилось и какая была громкость динамиков.
+// Нужен, чтобы разбираться, если громкость вдруг сама ушла в ноль. Никуда не отправляется.
+static class ActionLog
+{
+    static string Dir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OneClickSwitcher");
+    public static string FilePath => Path.Combine(Dir, "log.txt");
+
+    public static void Write(string what, int result)
+    {
+        try
+        {
+            Directory.CreateDirectory(Dir);
+            var fi = new FileInfo(FilePath);
+            if (fi.Exists && fi.Length > 200_000) File.Delete(FilePath);   // файл маленький: при росте начинаем заново
+            File.AppendAllText(FilePath,
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " | " + what + " | результат " + result + " | " + Speakers() + Environment.NewLine);
+        }
+        catch { }
+    }
+
+    static string Speakers()
+    {
+        try
+        {
+            using var en = new MMDeviceEnumerator();
+            var d = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            return "динамики: " + d.FriendlyName + ", громкость " + Math.Round(d.AudioEndpointVolume.MasterVolumeLevelScalar * 100) +
+                   " %, заглушено " + (d.AudioEndpointVolume.Mute ? "да" : "нет");
+        }
+        catch { return "динамики: не определены"; }
     }
 }
 
