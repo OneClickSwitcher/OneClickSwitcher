@@ -6,15 +6,11 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using NAudio.CoreAudioApi;
-using Windows.Devices.Enumeration;
 using Windows.Devices.Radios;
 
 ApplicationConfiguration.Initialize();
 
-// Где Windows хранит настройку «Доступ к камере»
-const string camKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
-const string camSystemKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
-
+#if !STORE   // в сборке для Магазина диагностика (в ней есть запись звука) не нужна
 // ===== Диагностика: --diag ничего не меняет, только записывает отчёт о микрофонах и радио на рабочий стол =====
 if (args.Contains("--diag"))
 {
@@ -163,11 +159,16 @@ if (args.Contains("--diag"))
         rep.AppendLine("Ошибка при чтении радиомодулей: " + ex.Message);
     }
 
-    var repPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "OneClickSwitcher-diag.txt");
+    // --diag-name on / off добавляет к имени файла отчёта метку, чтобы два замера не перезаписали друг друга
+    string diagSuffix = "";
+    int dn = Array.IndexOf(args, "--diag-name");
+    if (dn >= 0 && dn + 1 < args.Length) diagSuffix = "_" + new string(args[dn + 1].Where(char.IsLetterOrDigit).ToArray());
+    var repPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "OneClickSwitcher-diag" + diagSuffix + ".txt");
     File.WriteAllText(repPath, rep.ToString(), new System.Text.UTF8Encoding(true));
     try { Process.Start(new ProcessStartInfo("notepad.exe", "\"" + repPath + "\"") { UseShellExecute = true }); } catch { }
     return;
 }
+#endif
 
 // ===== Действия без состояния: --action имя (блокировка, сон, выключение, перезагрузка) =====
 int aIdx = Array.IndexOf(args, "--action");
@@ -398,75 +399,6 @@ int ToggleSound()
     }
 }
 
-// ===== Камера: есть ли на компьютере хотя бы одна камера =====
-async Task<bool> HasCamera()
-{
-    try
-    {
-        var devices = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
-        return devices.Count > 0;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
-// Закрыт ли доступ к камере политикой на уровне всего компьютера
-bool CameraDeniedBySystem()
-{
-    var v = Registry.GetValue(camSystemKey, "Value", null) as string;
-    return string.Equals(v, "Deny", StringComparison.OrdinalIgnoreCase);
-}
-
-// Доступ приложений к камере: 1 = разрешён, 0 = запрещён
-int ReadCameraAccess()
-{
-    if (CameraDeniedBySystem()) return 0;
-    var v = Registry.GetValue(camKey, "Value", null) as string;
-    return string.Equals(v, "Deny", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
-}
-
-// Записать настройку так же, как это делает сама Windows: значение и время изменения
-void WriteCameraAccess(string value)
-{
-    Registry.SetValue(camKey, "Value", value, RegistryValueKind.String);
-    Registry.SetValue(camKey, "LastSetTime", DateTime.UtcNow.ToFileTimeUtc(), RegistryValueKind.QWord);
-}
-
-// ===== Камера: узнать состояние =====
-async Task<int> GetCameraState()
-{
-    // Если доступ закрыт, показываем «выключен» даже когда камера не определяется: так можно вернуть доступ
-    if (ReadCameraAccess() == 0) return 0;
-    return await HasCamera() ? 1 : -1;
-}
-
-// ===== Камера: разрешить или запретить доступ приложениям =====
-async Task<int> ToggleCamera()
-{
-    try
-    {
-        if (ReadCameraAccess() == 0)
-        {
-            // Если закрыто на уровне компьютера, обычная программа это изменить не может
-            if (CameraDeniedBySystem()) return -2;
-            WriteCameraAccess("Allow");
-        }
-        else
-        {
-            if (!await HasCamera()) return -1;
-            WriteCameraAccess("Deny");
-        }
-        // Читаем обратно: так видно, что запись действительно прошла
-        return ReadCameraAccess();
-    }
-    catch
-    {
-        return -2;
-    }
-}
-
 // ===== Звук щелчка: собираем из чисел и превращаем в WAV прямо в памяти =====
 const int rate = 44100;
 
@@ -559,7 +491,6 @@ else
 
 var player = new SoundPlayer(ToWav(samples));
 player.Play();
-ActionLog.Write("ярлык: " + key, result);
 
 // ===== Показываем плашку внизу по центру экрана на 1,3 секунды =====
 string glyphKey = key;   // здесь key уже точно не пустой
@@ -725,8 +656,8 @@ static class Loc
         ["cd_restart"] = new[] { "Перезагрузка", "Restart" },
         ["cd_shuttingdown"] = new[] { "Выключение...", "Shutting down..." },
         ["cd_restarting"] = new[] { "Перезагрузка...", "Restarting..." },
-        ["cd_sub_shutdown"] = new[] { "Компьютер выключится через", "The computer will shut down in" },
-        ["cd_sub_restart"] = new[] { "Компьютер перезагрузится через", "The computer will restart in" },
+        ["cd_sub_shutdown"] = new[] { "Компьютер выключится через", "Shutting down in" },
+        ["cd_sub_restart"] = new[] { "Компьютер перезагрузится через", "Restarting in" },
         ["cd_sec"] = new[] { "с", "s" },
         ["cd_test"] = new[] { "(тест)", "(test)" },
         ["cd_hint"] = new[] { "Отмена: кнопка, Esc или ещё один клик по иконке", "Cancel: button, Esc, or click the icon again" },
@@ -1529,7 +1460,6 @@ class StatusForm : RoundForm
         poll.Tick += (s, e) => RefreshAll();
         poll.Start();
 
-        ActionLog.Write("открыто окно статуса", 0);
     }
 
     // ----- Положение элементов (в пикселях эскиза, масштаб добавляется сам) -----
@@ -1754,7 +1684,6 @@ class StatusForm : RoundForm
         else if (r == -1) state[i] = -1;
         else Msg(i, Loc.T("sp_failed"));
         playClick(r);
-        ActionLog.Write("окно статуса: " + FuncKeys[i], r);
         Invalidate();
         if (closeAfter) { Close(); return; }
         RefreshAll();   // переключение одной функции могло изменить другую (например, Bluetooth и микрофон гарнитуры)
@@ -1916,40 +1845,6 @@ class StatusForm : RoundForm
         poll.Stop();
         if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
         base.OnFormClosed(e);
-    }
-}
-
-// Небольшой журнал действий на вашем компьютере: что нажали, чем кончилось и какая была громкость динамиков.
-// Нужен, чтобы разбираться, если громкость вдруг сама ушла в ноль. Никуда не отправляется.
-static class ActionLog
-{
-    static string Dir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OneClickSwitcher");
-    public static string FilePath => Path.Combine(Dir, "log.txt");
-
-    public static void Write(string what, int result)
-    {
-        try
-        {
-            Directory.CreateDirectory(Dir);
-            var fi = new FileInfo(FilePath);
-            if (fi.Exists && fi.Length > 200_000) File.Delete(FilePath);   // файл маленький: при росте начинаем заново
-            File.AppendAllText(FilePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " | " + what + " | результат " + result + " | " + Speakers() + Environment.NewLine);
-        }
-        catch { }
-    }
-
-    static string Speakers()
-    {
-        try
-        {
-            using var en = new MMDeviceEnumerator();
-            var d = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            return "динамики: " + d.FriendlyName + ", громкость " + Math.Round(d.AudioEndpointVolume.MasterVolumeLevelScalar * 100) +
-                   " %, заглушено " + (d.AudioEndpointVolume.Mute ? "да" : "нет");
-        }
-        catch { return "динамики: не определены"; }
     }
 }
 
@@ -2151,7 +2046,7 @@ static class ShutdownCountdown
             TextAlign = ContentAlignment.TopLeft,
             ForeColor = Theme.Sub,
             Font = Ui.MakeFont("Segoe UI", 15),
-            Text = subText + " 5 " + sec
+            Text = subText + " 5\u00A0" + sec
         };
         var hint = new Label
         {
@@ -2211,7 +2106,7 @@ static class ShutdownCountdown
             if (left > 0)
             {
                 big.Text = left.ToString();
-                sub.Text = subText + " " + left + " " + sec;
+                sub.Text = subText + " " + left + "\u00A0" + sec;
                 Beeper.Play(0.35, (tones[5 - left], 150));   // нота для цифры 4, 3, 2, 1
             }
             else if (left == 0)
