@@ -35,12 +35,52 @@ if (args.Contains("--diag"))
 
         var all = en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.All).ToList();
         rep.AppendLine("=== Микрофоны (устройства записи): всего " + all.Count + " ===");
-        rep.AppendLine("Во время теста говорите в микрофон или стучите по столу 2 секунды: так видно, слышит ли его Windows.");
+        rep.AppendLine("Во время замера нужно говорить в микрофон или стучать по столу 4 секунды: так видно, слышит ли его Windows.");
         rep.AppendLine();
 
-        // Замеряем уровень сигнала 2 секунды (20 замеров по 0,1 с)
+        // Просим говорить именно в момент замера: раньше замер шёл молча, и «тишина» в отчёте ничего не доказывала
+        MessageBox.Show(
+            "Сейчас программа 4 секунды будет слушать микрофон." + Environment.NewLine + Environment.NewLine +
+            "Нажмите OK и сразу говорите в микрофон («раз, два, три...») или стучите по столу, пока не откроется отчёт.",
+            "One Click Switcher: диагностика");
+
+        // По-настоящему записываем звук с каждого активного микрофона, как это делает Telegram или Zoom,
+        // и ищем самое громкое место записи. Если микрофон выключен по-настоящему, будет 0
+        var recPeaks = new Dictionary<string, float>();
+        var captures = new List<WasapiCapture>();
+        foreach (var d in all)
+        {
+            if (d.State != DeviceState.Active) continue;
+            try
+            {
+                var cap = new WasapiCapture(d);
+                var fmt = cap.WaveFormat;
+                string id = d.ID;
+                recPeaks[id] = 0f;
+                cap.DataAvailable += (s2, ev) =>
+                {
+                    float max = 0f;
+                    if (fmt.BitsPerSample == 32)         // обычный формат Windows: дробные числа
+                    {
+                        for (int o = 0; o + 3 < ev.BytesRecorded; o += 4)
+                            max = Math.Max(max, Math.Abs(BitConverter.ToSingle(ev.Buffer, o)));
+                    }
+                    else if (fmt.BitsPerSample == 16)    // целые числа
+                    {
+                        for (int o = 0; o + 1 < ev.BytesRecorded; o += 2)
+                            max = Math.Max(max, Math.Abs((int)BitConverter.ToInt16(ev.Buffer, o)) / 32768f);
+                    }
+                    lock (recPeaks) { if (max > recPeaks[id]) recPeaks[id] = max; }
+                };
+                cap.StartRecording();
+                captures.Add(cap);
+            }
+            catch { }
+        }
+
+        // Заодно смотрим «полоску громкости» Windows, 4 секунды (40 замеров по 0,1 с)
         var peaks = new Dictionary<string, float>();
-        for (int i = 0; i < 20; i++)
+        for (int i = 0; i < 40; i++)
         {
             foreach (var d in all)
             {
@@ -54,10 +94,16 @@ if (args.Contains("--diag"))
             }
             Thread.Sleep(100);
         }
+        foreach (var cap in captures)
+        {
+            try { cap.StopRecording(); } catch { }
+            try { cap.Dispose(); } catch { }
+        }
 
         int n = 0;
         foreach (var d in all)
         {
+            if (d.State == DeviceState.NotPresent) continue;   // давно отключённые устройства в отчёте не нужны
             n++;
             rep.AppendLine("Микрофон " + n);
             try { rep.AppendLine("  Название: " + d.FriendlyName); } catch { rep.AppendLine("  Название: не удалось получить"); }
@@ -69,7 +115,8 @@ if (args.Contains("--diag"))
             {
                 try { rep.AppendLine("  Заглушен (Mute): " + (d.AudioEndpointVolume.Mute ? "ДА" : "нет")); } catch (Exception ex) { rep.AppendLine("  Заглушен: ошибка " + ex.Message); }
                 try { rep.AppendLine("  Громкость: " + Math.Round(d.AudioEndpointVolume.MasterVolumeLevelScalar * 100) + " %"); } catch { }
-                if (peaks.ContainsKey(d.ID)) rep.AppendLine("  Уровень сигнала за 2 с (0 тишина, 1 максимум): " + Math.Round(peaks[d.ID], 3));
+                if (recPeaks.ContainsKey(d.ID)) rep.AppendLine("  Записанный звук за 4 с, то есть то, что получают программы (0 тишина, 1 максимум): " + Math.Round(recPeaks[d.ID], 3));
+                if (peaks.ContainsKey(d.ID)) rep.AppendLine("  Полоска громкости Windows за 4 с (0 тишина, 1 максимум): " + Math.Round(peaks[d.ID], 3));
             }
             rep.AppendLine("  Код: " + d.ID);
             rep.AppendLine();
@@ -163,8 +210,8 @@ var switches = new Dictionary<string, (string Name, Func<Task<int>> Toggle, Func
 {
     ["bluetooth"] = ("Bluetooth", () => ToggleRadio(RadioKind.Bluetooth), () => GetRadioState(RadioKind.Bluetooth)),
     ["wifi"] = ("Wi-Fi", () => ToggleRadio(RadioKind.WiFi), () => GetRadioState(RadioKind.WiFi)),
-    ["mic"] = ("Микрофон", () => Task.FromResult(ToggleMicrophones()), () => Task.FromResult(GetMicState())),
-    ["sound"] = ("Звук", () => Task.FromResult(ToggleSound()), () => Task.FromResult(GetSoundState())),
+    ["mic"] = (Loc.T("title_mic"), () => Task.FromResult(ToggleMicrophones()), () => Task.FromResult(GetMicState())),
+    ["sound"] = (Loc.T("title_sound"), () => Task.FromResult(ToggleSound()), () => Task.FromResult(GetSoundState())),
 };
 
 // ===== Окно «Статус»: --status показывает все функции с переключателями и кнопками действий =====
@@ -227,14 +274,14 @@ if (key == null || !switches.ContainsKey(key))
     }
 
     MessageBox.Show(
-        "Запускайте программу через ярлыки, например:" + Environment.NewLine +
+        Loc.T("usage_head") + Environment.NewLine +
         "OneClickSwitcher.exe --toggle bluetooth" + Environment.NewLine +
         "OneClickSwitcher.exe --action lock" + Environment.NewLine +
         "OneClickSwitcher.exe --status" + Environment.NewLine + Environment.NewLine +
-        "OneClickSwitcher.exe --setup (окно с созданием ярлыков)" + Environment.NewLine + Environment.NewLine +
-        "Выключатели: " + string.Join(", ", switches.Keys) + Environment.NewLine +
-        "Действия: lock, sleep, shutdown, restart" + Environment.NewLine + Environment.NewLine +
-        "Получено: [" + string.Join(" | ", args) + "]",
+        "OneClickSwitcher.exe --setup (" + Loc.T("usage_setup") + ")" + Environment.NewLine + Environment.NewLine +
+        Loc.T("usage_switches") + " " + string.Join(", ", switches.Keys) + Environment.NewLine +
+        Loc.T("usage_actions") + " lock, sleep, shutdown, restart" + Environment.NewLine + Environment.NewLine +
+        Loc.T("usage_got") + " [" + string.Join(" | ", args) + "]",
         "One Click Switcher");
     return;
 }
@@ -494,17 +541,17 @@ AddSilence(samples, 100);
 
 if (result == 1)
 {
-    line = "Включён";
+    line = Loc.T("st_on");
     AddClick(samples, 2600, 220, 0.45);
 }
 else if (result == 0)
 {
-    line = "Выключен";
+    line = Loc.T("st_off");
     AddClick(samples, 1500, 130, 0.45);
 }
 else
 {
-    line = result == -1 ? "Не найден" : "Не удалось";
+    line = result == -1 ? Loc.T("st_notfound") : Loc.T("st_failed");
     AddClick(samples, 700, 90, 0.5);
     AddSilence(samples, 110);
     AddClick(samples, 700, 90, 0.5);
@@ -565,6 +612,129 @@ GC.KeepAlive(player);
 // ===== Типы: обязательно в самом конце файла =====
 
 // ----- Оформление: цвета, масштаб, значки -----
+
+// ----- Язык интерфейса -----
+// Все надписи программы собраны в одну таблицу: ключ -> { русский, английский }.
+// Язык берётся из Windows: русский, если система русская, иначе английский.
+// Для проверки язык можно задать вручную: OneClickSwitcher.exe --status --lang en
+// Чтобы добавить язык, нужна ещё одна колонка в таблице и ещё одно число в Detect()
+static class Loc
+{
+    public static readonly int Lang = Detect();   // 0 = русский, 1 = английский
+
+    static int Detect()
+    {
+        var a = Environment.GetCommandLineArgs();
+        int i = Array.IndexOf(a, "--lang");
+        if (i >= 0 && i + 1 < a.Length)
+        {
+            if (a[i + 1] == "ru") return 0;
+            if (a[i + 1] == "en") return 1;
+        }
+        return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru" ? 0 : 1;
+    }
+
+    // Текст по ключу на нужном языке; если ключа нет, возвращается сам ключ (так ошибку видно сразу)
+    public static string T(string key) => Table.TryGetValue(key, out var v) ? v[Lang] : key;
+    public static string T(string key, params object[] args) => string.Format(T(key), args);
+
+    // Тексты на всех языках: нужно, чтобы найти ярлык, созданный при другом языке интерфейса
+    public static IEnumerable<string> All(string key) => Table.TryGetValue(key, out var v) ? v : new[] { key };
+
+    static readonly Dictionary<string, string[]> Table = new()
+    {
+        // Названия ярлыков и выключателей
+        ["title_bluetooth"] = new[] { "Bluetooth", "Bluetooth" },
+        ["title_wifi"] = new[] { "Wi-Fi", "Wi-Fi" },
+        ["title_mic"] = new[] { "Микрофон", "Microphone" },
+        ["title_sound"] = new[] { "Звук", "Sound" },
+        ["title_lock"] = new[] { "Блокировка", "Lock" },
+        ["title_sleep"] = new[] { "Сон", "Sleep" },
+        ["title_status"] = new[] { "Статус", "Status" },
+        ["title_shutdown"] = new[] { "Выключение", "Shut down" },
+        ["title_restart"] = new[] { "Перезагрузка", "Restart" },
+
+        // Справка при запуске без параметров
+        ["usage_head"] = new[] { "Запускайте программу через ярлыки, например:", "Run the program through shortcuts, for example:" },
+        ["usage_setup"] = new[] { "окно с созданием ярлыков", "shortcut creation window" },
+        ["usage_switches"] = new[] { "Выключатели:", "Switches:" },
+        ["usage_actions"] = new[] { "Действия:", "Actions:" },
+        ["usage_got"] = new[] { "Получено:", "Received:" },
+
+        // Состояние на плашке
+        ["st_on"] = new[] { "Включён", "On" },
+        ["st_off"] = new[] { "Выключен", "Off" },
+        ["st_notfound"] = new[] { "Не найден", "Not found" },
+        ["st_failed"] = new[] { "Не получилось", "Didn't work" },
+
+        // Окно первого запуска
+        ["fr_sub"] = new[] { "Один клик по ярлыку, и функция переключена.", "One click on a shortcut, and the function is switched." },
+        ["fr_step1"] = new[] { "1. Какие ярлыки создать на рабочем столе", "1. Which shortcuts to create on the desktop" },
+        ["fr_installed"] = new[] { "установлен", "installed" },
+        ["fr_hint"] = new[] { "«Статус» открывает окно со всеми функциями.", "“Status” opens a window with all the functions." },
+        ["fr_step2"] = new[] { "2. Закрепите ярлыки на панели задач", "2. Pin the shortcuts to the taskbar" },
+        ["fr_pin_intro"] = new[] { "Ярлыки появятся на рабочем столе. Закреплять их нужно оттуда:", "The shortcuts appear on the desktop. Pin them from there:" },
+        ["fr_pin_steps"] = new[]
+        {
+            "1. Нажмите на ярлык правой кнопкой мыши." + Environment.NewLine +
+            "2. Если в меню есть «Закрепить на панели задач», выберите его. Так бывает в Windows 10 и в части версий Windows 11." + Environment.NewLine +
+            "3. Если такого пункта нет, выберите «Показать дополнительные параметры», а в открывшемся меню «Закрепить на панели задач».",
+
+            "1. Right-click a shortcut." + Environment.NewLine +
+            "2. If the menu has “Pin to taskbar”, choose it. This is how it works in Windows 10 and in some versions of Windows 11." + Environment.NewLine +
+            "3. If there is no such item, choose “Show more options”, and in the menu that opens choose “Pin to taskbar”."
+        },
+        ["fr_note"] = new[]
+        {
+            "Закреплённые значки работают сами по себе, поэтому ярлыки с рабочего стола после этого можно удалить. " +
+            "Саму программу, которую мы скопируем в постоянную папку, удалять и переносить нельзя: ярлыки ведут в неё.",
+
+            "Pinned icons work on their own, so the desktop shortcuts can be deleted afterwards. " +
+            "The program itself, which we copy to a permanent folder, must not be deleted or moved: the shortcuts point to it."
+        },
+        ["fr_copy_note"] = new[] { "Программа скопируется в вашу папку пользователя, ярлыки будут вести туда.", "The program will be copied to your user folder, and the shortcuts will point there." },
+        ["fr_close"] = new[] { "Закрыть", "Close" },
+        ["fr_create"] = new[] { "Создать ярлыки", "Create shortcuts" },
+        ["fr_none"] = new[] { "Ничего не выбрано.", "Nothing is selected." },
+        ["fr_copyfail"] = new[] { "Не удалось скопировать программу. Закройте окна One Click Switcher и повторите.", "Couldn't copy the program. Close the One Click Switcher windows and try again." },
+        ["fr_createfail"] = new[] { "Не удалось создать ярлыки.", "Couldn't create the shortcuts." },
+        ["fr_done"] = new[] { "Готово: ярлыки созданы", "Done: shortcuts created" },
+        ["fr_done_count"] = new[] { "Создано ярлыков: {0}. Они лежат на рабочем столе.", "Shortcuts created: {0}. They are on the desktop." },
+        ["fr_pin_next"] = new[] { "Осталось закрепить нужные ярлыки на панели задач. Как это сделать, написано ниже.", "All that is left is to pin the shortcuts you need to the taskbar. How to do it is described below." },
+        ["fr_copied"] = new[] { "Программа скопирована в папку {0}. Файл, который вы запускали, теперь можно удалить.", "The program was copied to the folder {0}. The file you ran can now be deleted." },
+        ["fr_inplace"] = new[] { "Программа уже работает из своей постоянной папки: {0}.", "The program is already running from its permanent folder: {0}." },
+        ["fr_finished"] = new[] { "Установка закончена. Окно можно закрыть.", "Setup is finished. You can close this window." },
+        ["fr_all"] = new[] { "Все ярлыки установлены.", "All shortcuts are installed." },
+
+        // Окно «Статус»
+        ["sp_shortcut"] = new[] { "ярлык", "shortcut" },
+        ["sp_created"] = new[] { "создан", "created" },
+        ["sp_exists"] = new[] { "есть", "exists" },
+        ["sp_none"] = new[] { "нет", "none" },
+        ["sp_actions"] = new[] { "ДЕЙСТВИЯ", "ACTIONS" },
+        ["sp_link"] = new[] { "Создать ярлыки…", "Create shortcuts…" },
+        ["sp_notfound"] = new[] { "не найдено", "not found" },
+        ["sp_failed"] = new[] { "не получилось", "didn't work" },
+        ["act_lock"] = new[] { "Блокировка", "Lock" },
+        ["act_sleep"] = new[] { "Сон", "Sleep" },
+        ["act_shutdown"] = new[] { "Выключить", "Shut down" },
+        ["act_restart"] = new[] { "Перезагрузка", "Restart" },
+
+        // Отсчёт выключения и перезагрузки
+        ["cd_shutdown"] = new[] { "Выключение", "Shut down" },
+        ["cd_restart"] = new[] { "Перезагрузка", "Restart" },
+        ["cd_shuttingdown"] = new[] { "Выключение...", "Shutting down..." },
+        ["cd_restarting"] = new[] { "Перезагрузка...", "Restarting..." },
+        ["cd_sub_shutdown"] = new[] { "Компьютер выключится через", "The computer will shut down in" },
+        ["cd_sub_restart"] = new[] { "Компьютер перезагрузится через", "The computer will restart in" },
+        ["cd_sec"] = new[] { "с", "s" },
+        ["cd_test"] = new[] { "(тест)", "(test)" },
+        ["cd_hint"] = new[] { "Отмена: кнопка, Esc или ещё один клик по иконке", "Cancel: button, Esc, or click the icon again" },
+        ["cd_cancel"] = new[] { "Отмена", "Cancel" },
+        ["cd_test_shutdown"] = new[] { "Тестовый режим: компьютер не выключится", "Test mode: the computer will not shut down" },
+        ["cd_test_restart"] = new[] { "Тестовый режим: компьютер не перезагрузится", "Test mode: the computer will not restart" },
+    };
+}
 
 // Масштаб экрана: на экране 150% все размеры умножаются на 1,5
 static class Ui
@@ -879,13 +1049,13 @@ static class Shortcuts
     {
         ("bluetooth", "Bluetooth", "--toggle bluetooth"),
         ("wifi", "Wi-Fi", "--toggle wifi"),
-        ("mic", "Микрофон", "--toggle mic"),
-        ("sound", "Звук", "--toggle sound"),
-        ("lock", "Блокировка", "--action lock"),
-        ("sleep", "Сон", "--action sleep"),
-        ("status", "Статус", "--status"),
-        ("shutdown", "Выключение", "--action shutdown"),
-        ("restart", "Перезагрузка", "--action restart"),
+        ("mic", Loc.T("title_mic"), "--toggle mic"),
+        ("sound", Loc.T("title_sound"), "--toggle sound"),
+        ("lock", Loc.T("title_lock"), "--action lock"),
+        ("sleep", Loc.T("title_sleep"), "--action sleep"),
+        ("status", Loc.T("title_status"), "--status"),
+        ("shutdown", Loc.T("title_shutdown"), "--action shutdown"),
+        ("restart", Loc.T("title_restart"), "--action restart"),
     };
 
     // Значки лежат отдельно от программы, в папке пользователя
@@ -917,10 +1087,9 @@ static class Shortcuts
     // Есть ли уже на рабочем столе ярлык этой функции
     public static bool Exists(string key)
     {
-        foreach (var item in All)
-            if (item.Key == key)
-                return File.Exists(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), item.Title + ".lnk"));
+        string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        foreach (var title in Loc.All("title_" + key))
+            if (File.Exists(Path.Combine(desktop, title + ".lnk"))) return true;
         return false;
     }
 
@@ -1108,11 +1277,11 @@ class FirstRunForm : Form
             Size = new Size(Ui.S(48), Ui.S(48))
         });
         AddLabel("One Click Switcher", 84, 24, 560, 30, 22, "Segoe UI Semibold");
-        AddLabel("Один клик по ярлыку, и функция переключена.", 84, 54, 560, 22, 15, color: Theme.Sub);
+        AddLabel(Loc.T("fr_sub"), 84, 54, 560, 22, 15, color: Theme.Sub);
 
         // Шаг 1: выбор ярлыков (после создания этот блок заменяется сообщением «Готово»)
         var step1 = new List<Control>();
-        step1.Add(AddLabel("1. Какие ярлыки создать на рабочем столе", 24, 92, 632, 26, 17, "Segoe UI Semibold"));
+        step1.Add(AddLabel(Loc.T("fr_step1"), 24, 92, 632, 26, 17, "Segoe UI Semibold"));
         var rows = new List<CheckRow>();
         string[] order = { "status", "bluetooth", "wifi", "mic", "sound", "lock", "sleep", "shutdown", "restart" };
         for (int i = 0; i < order.Length; i++)
@@ -1126,7 +1295,7 @@ class FirstRunForm : Form
                 // Ярлыки, которые уже лежат на столе, отмечены и недоступны
                 Installed = Shortcuts.Exists(item.Key),
                 Checked = Shortcuts.Exists(item.Key) || item.Key == "status",
-                Note = Shortcuts.Exists(item.Key) ? "установлен" : "",
+                Note = Shortcuts.Exists(item.Key) ? Loc.T("fr_installed") : "",
                 Location = new Point(Ui.S(24 + (i % 2) * 320), Ui.S(126 + (i / 2) * 50)),
                 Size = new Size(Ui.S(312), Ui.S(44))
             };
@@ -1139,35 +1308,32 @@ class FirstRunForm : Form
             step1.Add(row);
             Controls.Add(row);
         }
-        step1.Add(AddLabel("«Статус» открывает окно со всеми функциями.",
+        step1.Add(AddLabel(Loc.T("fr_hint"),
             24, 376, 632, 22, 14, color: Theme.Sub));
 
         // Шаг 2: закрепление на панели задач
         var lower = new List<Control>();   // всё, что поднимется вверх после создания ярлыков
-        var step2Title = AddLabel("2. Закрепите ярлыки на панели задач", 24, 408, 632, 26, 17, "Segoe UI Semibold");
+        var step2Title = AddLabel(Loc.T("fr_step2"), 24, 408, 632, 26, 17, "Segoe UI Semibold");
         lower.Add(step2Title);
-        lower.Add(AddLabel("Ярлыки появятся на рабочем столе. Закреплять их нужно оттуда:", 24, 436, 632, 22, 15));
+        lower.Add(AddLabel(Loc.T("fr_pin_intro"), 24, 436, 632, 22, 15));
         lower.Add(AddLabel(
-            "1. Нажмите на ярлык правой кнопкой мыши." + Environment.NewLine +
-            "2. Если в меню есть «Закрепить на панели задач», выберите его. Так бывает в Windows 10 и в части версий Windows 11." + Environment.NewLine +
-            "3. Если такого пункта нет, выберите «Показать дополнительные параметры», а в открывшемся меню «Закрепить на панели задач».",
+            Loc.T("fr_pin_steps"),
             24, 460, 632, 106, 15));
 
         // Заметка
         var note = AddLabel(
-            "Закреплённые значки работают сами по себе, поэтому ярлыки с рабочего стола после этого можно удалить. " +
-            "Саму программу, которую мы скопируем в постоянную папку, удалять и переносить нельзя: ярлыки ведут в неё.",
+            Loc.T("fr_note"),
             24, 574, 632, 84, 15);
         note.BackColor = Theme.Note;
         note.Padding = new Padding(Ui.S(14), Ui.S(10), Ui.S(14), Ui.S(10));
         lower.Add(note);
 
         // Кнопки и результат
-        var result = AddLabel("Программа скопируется в вашу папку пользователя, ярлыки будут вести туда.",
+        var result = AddLabel(Loc.T("fr_copy_note"),
             24, 672, 320, 40, 13, color: Theme.Sub);
         result.TextAlign = ContentAlignment.MiddleLeft;
-        var close = AddButton("Закрыть", 536, 120, false);
-        var create = AddButton("Создать ярлыки", 354, 170, true);
+        var close = AddButton(Loc.T("fr_close"), 536, 120, false);
+        var create = AddButton(Loc.T("fr_create"), 354, 170, true);
         lower.Add(result);
         lower.Add(close);
         lower.Add(create);
@@ -1178,7 +1344,7 @@ class FirstRunForm : Form
             if (chosen.Count == 0)
             {
                 result.ForeColor = Theme.Sub;
-                result.Text = "Ничего не выбрано.";
+                result.Text = Loc.T("fr_none");
                 return;
             }
 
@@ -1192,7 +1358,7 @@ class FirstRunForm : Form
             catch
             {
                 result.ForeColor = Theme.Bad;
-                result.Text = "Не удалось скопировать программу. Закройте окна One Click Switcher и повторите.";
+                result.Text = Loc.T("fr_copyfail");
                 return;
             }
 
@@ -1208,7 +1374,7 @@ class FirstRunForm : Form
             if (n == 0)
             {
                 result.ForeColor = Theme.Bad;
-                result.Text = "Не удалось создать ярлыки.";
+                result.Text = Loc.T("fr_createfail");
                 return;
             }
 
@@ -1225,19 +1391,19 @@ class FirstRunForm : Form
                 Location = new Point(Ui.S(24), Ui.S(100)),
                 Size = new Size(Ui.S(56), Ui.S(56))
             });
-            AddLabel("Готово: ярлыки созданы", 96, 98, 560, 34, 24, "Segoe UI Semibold");
-            AddLabel("Создано ярлыков: " + n + ". Они лежат на рабочем столе.",
+            AddLabel(Loc.T("fr_done"), 96, 98, 560, 34, 24, "Segoe UI Semibold");
+            AddLabel(Loc.T("fr_done_count", n),
                 96, 134, 560, 26, 16, color: Theme.Sub);
-            AddLabel("Осталось закрепить нужные ярлыки на панели задач. Как это сделать, написано ниже.",
+            AddLabel(Loc.T("fr_pin_next"),
                 24, 170, 632, 48, 16, "Segoe UI Semibold");
             AddLabel(copied
-                    ? "Программа скопирована в папку " + Shortcuts.InstallDir + ". Файл, который вы запускали, теперь можно удалить."
-                    : "Программа уже работает из своей постоянной папки: " + Shortcuts.InstallDir + ".",
+                    ? Loc.T("fr_copied", Shortcuts.InstallDir)
+                    : Loc.T("fr_inplace", Shortcuts.InstallDir),
                 24, 222, 632, 64, 15, color: Theme.Sub);
 
             // Сообщение «окно можно закрыть» читается в самом конце, рядом с кнопкой «Закрыть»
             result.ForeColor = Theme.On;
-            result.Text = "Установка закончена. Окно можно закрыть.";
+            result.Text = Loc.T("fr_finished");
             result.Visible = true;
 
             // Остальное поднимаем вверх на место выбора ярлыков
@@ -1256,7 +1422,7 @@ class FirstRunForm : Form
         {
             create.Visible = false;
             result.ForeColor = Theme.On;
-            result.Text = "Все ярлыки установлены.";
+            result.Text = Loc.T("fr_all");
             close.Left = Ui.S(656) - close.Width;
             close.BackColor = Theme.Primary;
             close.ForeColor = Color.White;
@@ -1312,10 +1478,10 @@ class StatusForm : RoundForm
     static readonly string[] FuncKeys = { "bluetooth", "wifi", "mic", "sound" };
     static readonly (string Key, string Title, string Args)[] Actions =
     {
-        ("lock", "Блокировка", "--action lock"),
-        ("sleep", "Сон", "--action sleep"),
-        ("shutdown", "Выключить", "--action shutdown"),
-        ("restart", "Перезагрузка", "--action restart"),
+        ("lock", Loc.T("act_lock"), "--action lock"),
+        ("sleep", Loc.T("act_sleep"), "--action sleep"),
+        ("shutdown", Loc.T("act_shutdown"), "--action shutdown"),
+        ("restart", Loc.T("act_restart"), "--action restart"),
     };
 
     readonly int[] state;                       // 1 = включено, 0 = выключено, -1 = нет устройства
@@ -1428,12 +1594,12 @@ class StatusForm : RoundForm
                     g.FillPath(fill, path);
                     using var border = new Pen(Theme.BtnLine);
                     g.DrawPath(border, path);
-                    Ui.DrawText(g, "ярлык", chipFont, Theme.Text, c, StringAlignment.Center);
+                    Ui.DrawText(g, Loc.T("sp_shortcut"), chipFont, Theme.Text, c, StringAlignment.Center);
                 }
                 else
                 {
                     Color c2 = created[i] ? Theme.On : Theme.Sub;
-                    string word = created[i] ? "создан" : "есть";
+                    string word = created[i] ? Loc.T("sp_created") : Loc.T("sp_exists");
                     Ui.DrawText(g, word, chipFont, c2,
                         new RectangleF(Ui.S(246), r.Y, Ui.S(68), r.Height), StringAlignment.Far);
                     float cy = r.Y + r.Height / 2f;
@@ -1450,7 +1616,7 @@ class StatusForm : RoundForm
 
             // Справа переключатель или «нет», если устройства нет
             if (st == -1)
-                Ui.DrawText(g, "нет", noFont, Theme.Bad, new RectangleF(Ui.S(300), r.Y, Ui.S(78), r.Height), StringAlignment.Far);
+                Ui.DrawText(g, Loc.T("sp_none"), noFont, Theme.Bad, new RectangleF(Ui.S(300), r.Y, Ui.S(78), r.Height), StringAlignment.Far);
             else
                 DrawSwitch(g, SwitchRect(i), st == 1, busy[i]);
         }
@@ -1461,7 +1627,7 @@ class StatusForm : RoundForm
             g.DrawLine(line, Ui.S(16), Ui.S(232), Width - Ui.S(16), Ui.S(232));
             if (showLink) g.DrawLine(line, Ui.S(16), Ui.S(359), Width - Ui.S(16), Ui.S(359));
         }
-        Ui.DrawText(g, "ДЕЙСТВИЯ", capFont, Theme.Sub, new RectangleF(Ui.S(16), Ui.S(242), Ui.S(200), Ui.S(22)));
+        Ui.DrawText(g, Loc.T("sp_actions"), capFont, Theme.Sub, new RectangleF(Ui.S(16), Ui.S(242), Ui.S(200), Ui.S(22)));
 
         for (int i = 0; i < 4; i++)
         {
@@ -1488,7 +1654,7 @@ class StatusForm : RoundForm
             g.FillPath(fill, path);
         }
         if (showLink)
-            Ui.DrawText(g, "Создать ярлыки…", linkFont, Theme.On, new RectangleF(Ui.S(20), Ui.S(366), Ui.S(360), Ui.S(44)));
+            Ui.DrawText(g, Loc.T("sp_link"), linkFont, Theme.On, new RectangleF(Ui.S(20), Ui.S(366), Ui.S(360), Ui.S(44)));
     }
 
     // Переключатель: дорожка и круглый ползунок. Пока функция переключается, рисуется бледнее
@@ -1557,7 +1723,7 @@ class StatusForm : RoundForm
             else if (state[i] != -1 && !busy[i]) ToggleRow(i);
             else if (state[i] == -1)
             {
-                Msg(i, "не найдено");   // устройства нет: проверяем ещё раз, вдруг уже появилось
+                Msg(i, Loc.T("sp_notfound"));   // устройства нет: проверяем ещё раз, вдруг уже появилось
                 RefreshAll();
                 Invalidate();
             }
@@ -1586,7 +1752,7 @@ class StatusForm : RoundForm
 
         if (r == 1 || r == 0) state[i] = r;
         else if (r == -1) state[i] = -1;
-        else Msg(i, "не удалось");
+        else Msg(i, Loc.T("sp_failed"));
         playClick(r);
         ActionLog.Write("окно статуса: " + FuncKeys[i], r);
         Invalidate();
@@ -1628,9 +1794,9 @@ class StatusForm : RoundForm
                 created[i] = true;
                 playClick(1);
             }
-            else Msg(i, "не удалось");
+            else Msg(i, Loc.T("sp_failed"));
         }
-        catch { Msg(i, "не удалось"); }
+        catch { Msg(i, Loc.T("sp_failed")); }
         Invalidate();
     }
 
@@ -1646,7 +1812,7 @@ class StatusForm : RoundForm
         try
         {
             string? exe = Environment.ProcessPath;
-            if (exe != null) Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false });
+            if (exe != null) Process.Start(new ProcessStartInfo(exe, args + " --lang " + (Loc.Lang == 0 ? "ru" : "en")) { UseShellExecute = false });
         }
         catch { }
         Close();
@@ -1674,6 +1840,53 @@ class StatusForm : RoundForm
         base.OnShown(e);
         lastInside = DateTime.Now;
         Activate();
+
+        // Пока окно открыто, слушаем нажатия мыши по всему экрану (см. OnMouseHook)
+        try
+        {
+            mouseHookProc = OnMouseHook;
+            mouseHook = SetWindowsHookEx(14, mouseHookProc, GetModuleHandle(null), 0);   // 14 = WH_MOUSE_LL
+        }
+        catch { mouseHook = IntPtr.Zero; }
+    }
+
+    // ----- Закрытие щелчком в любом другом месте экрана -----
+    // Щелчок на панели задач намеренно пропускаем: там пользователь нажимает на сам ярлык,
+    // и второй запуск программы закрывает окно сам. Если закрывать его здесь, окно закрылось бы
+    // и тут же открылось снова.
+    [StructLayout(LayoutKind.Sequential)]
+    struct MouseHookData { public int X, Y; public uint MouseData, Flags, Time; public IntPtr Extra; }
+    delegate IntPtr MouseHookProc(int code, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr SetWindowsHookEx(int idHook, MouseHookProc callback, IntPtr module, uint threadId);
+    [DllImport("user32.dll")]
+    static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")]
+    static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr GetModuleHandle(string? name);
+
+    MouseHookProc? mouseHookProc;   // ссылка нужна, чтобы Windows не потеряла обработчик
+    IntPtr mouseHook = IntPtr.Zero;
+
+    IntPtr OnMouseHook(int code, IntPtr wParam, IntPtr lParam)
+    {
+        try
+        {
+            int msg = (int)wParam;
+            // 0x201, 0x204, 0x207: нажатие левой, правой, средней кнопки мыши
+            if (code >= 0 && (msg == 0x201 || msg == 0x204 || msg == 0x207) && IsHandleCreated)
+            {
+                var d = Marshal.PtrToStructure<MouseHookData>(lParam);
+                var p = new Point(d.X, d.Y);
+                bool outside = !Bounds.Contains(p);
+                bool onTaskbar = !Screen.FromPoint(p).WorkingArea.Contains(p);
+                if (outside && !onTaskbar) BeginInvoke(new Action(Close));
+            }
+        }
+        catch { }
+        return CallNextHookEx(mouseHook, code, wParam, lParam);
     }
 
     protected override bool ProcessCmdKey(ref Message m, Keys keyData)
@@ -1701,6 +1914,7 @@ class StatusForm : RoundForm
     {
         watch.Stop();
         poll.Stop();
+        if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
         base.OnFormClosed(e);
     }
 }
@@ -1876,11 +2090,12 @@ static class ShutdownCountdown
     public static void Run(bool restart, bool test)
     {
         // Всё, что отличается у выключения и перезагрузки, собрано в четырёх строках
-        string verb = restart ? "Перезагрузка" : "Выключение";
+        string verb = restart ? Loc.T("cd_restart") : Loc.T("cd_shutdown");
         string finalWord = restart ? "Restart" : "Shut down";
-        string finalHint = restart ? "Перезагрузка..." : "Выключение...";
+        string finalHint = restart ? Loc.T("cd_restarting") : Loc.T("cd_shuttingdown");
         string command = restart ? "/r /t 0" : "/s /t 0";
-        string subText = restart ? "Компьютер перезагрузится через" : "Компьютер выключится через";
+        string subText = restart ? Loc.T("cd_sub_restart") : Loc.T("cd_sub_shutdown");
+        string sec = Loc.T("cd_sec");
 
         // Ноты отсчёта сверху вниз: на каждую цифру 5, 4, 3, 2, 1 своя (частота в герцах)
         double[] tones = { 988.0, 880.0, 784.0, 659.0, 587.0 };
@@ -1928,7 +2143,7 @@ static class ShutdownCountdown
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Theme.Text,
             Font = Ui.MakeFont("Segoe UI Semibold", 22),
-            Text = test ? verb + " (тест)" : verb
+            Text = test ? verb + " " + Loc.T("cd_test") : verb
         };
         var sub = new Label
         {
@@ -1936,7 +2151,7 @@ static class ShutdownCountdown
             TextAlign = ContentAlignment.TopLeft,
             ForeColor = Theme.Sub,
             Font = Ui.MakeFont("Segoe UI", 15),
-            Text = subText + " 5 с"
+            Text = subText + " 5 " + sec
         };
         var hint = new Label
         {
@@ -1944,7 +2159,7 @@ static class ShutdownCountdown
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Theme.Sub,
             Font = Ui.MakeFont("Segoe UI", 13),
-            Text = "Отмена: кнопка, Esc или ещё один клик по иконке"
+            Text = Loc.T("cd_hint")
         };
         var btn = new Button
         {
@@ -1954,7 +2169,7 @@ static class ShutdownCountdown
             BackColor = Theme.Btn,
             ForeColor = Theme.Text,
             Font = Ui.MakeFont("Segoe UI Semibold", 17),
-            Text = "Отмена"
+            Text = Loc.T("cd_cancel")
         };
         btn.FlatAppearance.BorderSize = 1;
         btn.FlatAppearance.BorderColor = Theme.BtnLine;
@@ -1996,7 +2211,7 @@ static class ShutdownCountdown
             if (left > 0)
             {
                 big.Text = left.ToString();
-                sub.Text = subText + " " + left + " с";
+                sub.Text = subText + " " + left + " " + sec;
                 Beeper.Play(0.35, (tones[5 - left], 150));   // нота для цифры 4, 3, 2, 1
             }
             else if (left == 0)
@@ -2005,7 +2220,7 @@ static class ShutdownCountdown
                 Beeper.Play(0.4, (392.0, 450));   // низкая длинная нота: отмена уже невозможна
                 big.Text = "0";
                 title.Text = finalWord;
-                sub.Text = test ? "Тестовый режим: компьютер не " + (restart ? "перезагрузится" : "выключится") : finalHint;
+                sub.Text = test ? (restart ? Loc.T("cd_test_restart") : Loc.T("cd_test_shutdown")) : finalHint;
                 hint.Text = "";
                 btn.Enabled = false;
             }
