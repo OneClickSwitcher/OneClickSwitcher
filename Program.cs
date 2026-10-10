@@ -989,13 +989,34 @@ static class Shortcuts
         ("restart", Loc.T("title_restart"), "--action restart"),
     };
 
-    // Значки лежат отдельно от программы, в папке пользователя
-    public static string IconsDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OneClickSwitcher", "icons");
+    // Запущена ли программа как установленная из Магазина (пакет MSIX)
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetCurrentPackageFullName(ref int length, System.Text.StringBuilder? name);
+    public static bool Packaged
+    {
+        get
+        {
+            int len = 0;
+            return GetCurrentPackageFullName(ref len, null) != 15700;   // 15700 = «программа не из пакета»
+        }
+    }
 
-    // Постоянная папка программы: в профиле пользователя, права администратора не нужны
-    public static string InstallDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "OneClickSwitcher");
+    // «Псевдоним запуска»: Windows создаёт его при установке из Магазина, он всегда ведёт на актуальную версию
+    public static string AliasPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "OneClickSwitcher.exe");
+
+    // Значки лежат отдельно от программы, в папке пользователя.
+    // Из Магазина: запись в обычную AppData Windows незаметно перенаправляет внутрь пакета, и ярлыки значков не увидят.
+    // Поэтому берём настоящую папку данных пакета: она обычная, и оболочка Windows читает значки оттуда
+    public static string IconsDir => Packaged
+        ? Path.Combine(Windows.Storage.ApplicationData.Current.LocalCacheFolder.Path, "icons")
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OneClickSwitcher", "icons");
+
+    // Постоянная папка программы: в профиле пользователя, права администратора не нужны.
+    // Из Магазина программа лежит в защищённой папке Windows, копировать её не нужно
+    public static string InstallDir => Packaged
+        ? Path.GetDirectoryName(AliasPath)!
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "OneClickSwitcher");
 
     // Копирует программу в постоянную папку и возвращает путь к копии.
     // copied = false, если программа уже запущена оттуда (копировать нечего).
@@ -1005,6 +1026,7 @@ static class Shortcuts
         string exe = Environment.ProcessPath ?? "";
         string target = Path.Combine(InstallDir, "OneClickSwitcher.exe");
         copied = false;
+        if (Packaged) return AliasPath;   // ярлыки ведут на псевдоним: Магазин сам обновляет программу под ним
         if (exe == "") throw new InvalidOperationException("Не удалось определить путь к программе");
         if (string.Equals(Path.GetFullPath(exe), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
             return exe;
