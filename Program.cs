@@ -602,6 +602,7 @@ static class Loc
         ["fr_sub"] = new[] { "Один клик по ярлыку, и функция переключена.", "One click on a shortcut, and the function is switched." },
         ["fr_step1"] = new[] { "1. Какие ярлыки создать на рабочем столе", "1. Which shortcuts to create on the desktop" },
         ["fr_installed"] = new[] { "установлен", "installed" },
+        ["fr_pinned"] = new[] { "на панели задач", "on the taskbar" },
         ["fr_hint"] = new[] { "«Статус» открывает окно со всеми функциями.", "“Status” opens a window with all the functions." },
         ["fr_step2"] = new[] { "2. Закрепите ярлыки на панели задач", "2. Pin the shortcuts to the taskbar" },
         ["fr_pin_intro"] = new[] { "Ярлыки появятся на рабочем столе. Закреплять их нужно оттуда:", "The shortcuts appear on the desktop. Pin them from there:" },
@@ -1143,7 +1144,7 @@ class CheckRow : Control
     public string Title = "";
     public bool Checked;
     public string Note = "";   // надпись справа, например «установлен»
-    public bool Installed;     // ярлык уже на рабочем столе: строка неактивна
+    public bool Installed;     // ярлык уже на рабочем столе или на панели задач: строка неактивна
 
     public CheckRow()
     {
@@ -1223,7 +1224,7 @@ class CheckRow : Control
         var tile = new RectangleF(cx + cb + Ui.F(12), (Height - t) / 2f, t, t);
         Ui.DrawTile(g, tile, Ui.F(8), Theme.Tile, Key, Color.White, false, 2.2, 0.60f);
         using var font = Ui.MakeFont("Segoe UI", 17);
-        float noteW = Note == "" ? 0 : Ui.F(Installed ? 88 : 70);
+        float noteW = Note == "" ? 0 : Ui.F(Installed ? (Note.Length > 11 ? 120 : 88) : 70);
         Ui.DrawText(g, Title, font, Installed ? Theme.Sub : Theme.Text,
             new RectangleF(tile.Right + Ui.F(12), 0, Width - tile.Right - Ui.F(16) - noteW, Height));
         if (Note != "")
@@ -1281,10 +1282,11 @@ class FirstRunForm : Form
                 Key = item.Key,
                 Title = item.Title,
                 // По умолчанию отмечен только «Статус»; остальное человек выбирает сам.
-                // Ярлыки, которые уже лежат на столе, отмечены и недоступны
-                Installed = Shortcuts.Exists(item.Key),
-                Checked = Shortcuts.Exists(item.Key) || item.Key == "status",
-                Note = Shortcuts.Exists(item.Key) ? Loc.T("fr_installed") : "",
+                // Ярлыки, которые уже лежат на столе или закреплены на панели задач, отмечены и недоступны
+                Installed = Shortcuts.ExistsAnywhere(item.Key),
+                Checked = Shortcuts.ExistsAnywhere(item.Key) || item.Key == "status",
+                Note = Shortcuts.Exists(item.Key) ? Loc.T("fr_installed")
+                     : Shortcuts.ExistsAnywhere(item.Key) ? Loc.T("fr_pinned") : "",
                 Location = new Point(Ui.S(24 + (i % 2) * 320), Ui.S(126 + (i / 2) * 50)),
                 Size = new Size(Ui.S(312), Ui.S(44))
             };
