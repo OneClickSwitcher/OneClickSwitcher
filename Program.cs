@@ -638,9 +638,6 @@ static class Loc
         ["fr_all"] = new[] { "Все ярлыки установлены.", "All shortcuts are installed." },
 
         // Окно «Статус»
-        ["sp_shortcut"] = new[] { "ярлык", "shortcut" },
-        ["sp_created"] = new[] { "создан", "created" },
-        ["sp_exists"] = new[] { "есть", "exists" },
         ["sp_none"] = new[] { "нет", "none" },
         ["sp_actions"] = new[] { "ДЕЙСТВИЯ", "ACTIONS" },
         ["sp_link"] = new[] { "Создать ярлыки…", "Create shortcuts…" },
@@ -1046,6 +1043,45 @@ static class Shortcuts
         return false;
     }
 
+    // Есть ли ярлык этой функции на рабочем столе или на панели задач
+    public static bool ExistsAnywhere(string key)
+    {
+        if (Exists(key)) return true;
+        string? args = All.Where(a => a.Key == key).Select(a => a.Args).FirstOrDefault();
+        return args != null && PinnedArgs().Contains(args);
+    }
+
+    // Параметры запуска ярлыков, закреплённых на панели задач.
+    // Windows хранит такие ярлыки в папке User Pinned\TaskBar; ярлык узнаём по параметрам, а не по названию
+    static HashSet<string>? pinnedArgs;
+    static HashSet<string> PinnedArgs()
+    {
+        if (pinnedArgs != null) return pinnedArgs;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Microsoft", "Internet Explorer", "Quick Launch", "User Pinned", "TaskBar");
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType != null && Directory.Exists(dir))
+            {
+                dynamic shell = Activator.CreateInstance(shellType)!;
+                foreach (var file in Directory.GetFiles(dir, "*.lnk"))
+                {
+                    try
+                    {
+                        string a = shell.CreateShortcut(file).Arguments;
+                        if (!string.IsNullOrWhiteSpace(a)) set.Add(a.Trim());
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+        pinnedArgs = set;
+        return set;
+    }
+
     // Создаёт ярлыки на программу exe. Возвращает, сколько ярлыков создано
     public static int CreateOnDesktop(IEnumerable<string> keys, string exe)
     {
@@ -1439,13 +1475,11 @@ class StatusForm : RoundForm
 
     readonly int[] state;                       // 1 = включено, 0 = выключено, -1 = нет устройства
     readonly bool[] busy = new bool[4];         // функция сейчас переключается
-    readonly bool[] existed = new bool[4];      // ярлык уже лежал на рабочем столе
-    readonly bool[] created = new bool[4];      // ярлык создан из этого окна
     readonly string?[] rowMsg = new string?[4]; // короткое сообщение об ошибке в строке
     readonly DateTime[] rowMsgUntil = new DateTime[4];
 
     int hoverRow = -1, hoverAction = -1;
-    bool hoverLink, hoverChip;
+    bool hoverLink;
     bool closeAfter;                            // закрыть, как только закончится переключение
     bool refreshing;                            // идёт обновление состояний
     DateTime lastInside = DateTime.Now;         // когда мышь последний раз была над окном
@@ -1465,14 +1499,12 @@ class StatusForm : RoundForm
         TopMost = true;
         BackColor = Theme.Card;
         Opacity = 0.97;
-        // Ссылка «Создать ярлыки…» нужна, только пока какого-то ярлыка ещё нет
+        // Ссылка «Создать ярлыки…» нужна, только пока какого-то ярлыка ещё нет (ни на столе, ни на панели задач)
         showLink = new[] { "status", "bluetooth", "wifi", "mic", "sound", "lock", "sleep", "shutdown", "restart" }
-            .Any(k => !Shortcuts.Exists(k));
+            .Any(k => !Shortcuts.ExistsAnywhere(k));
         Size = new Size(Ui.S(400), Ui.S(showLink ? 421 : 366));
         var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
         Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - Ui.S(48));
-
-        for (int i = 0; i < 4; i++) existed[i] = Shortcuts.Exists(FuncKeys[i]);
 
         watch.Tick += (s, e) => Watch();
         watch.Start();
@@ -1487,13 +1519,9 @@ class StatusForm : RoundForm
     // ----- Положение элементов (в пикселях эскиза, масштаб добавляется сам) -----
     Rectangle RowRect(int i) => new Rectangle(Ui.S(8), Ui.S(8) + i * Ui.S(54), Ui.S(384), Ui.S(54));
     Rectangle SwitchRect(int i) => new Rectangle(Ui.S(330), RowRect(i).Y + Ui.S(13), Ui.S(48), Ui.S(28));
-    Rectangle ChipRect(int i) => new Rectangle(Ui.S(236), RowRect(i).Y + Ui.S(11), Ui.S(78), Ui.S(32));
     Rectangle ActionRect(int i) => new Rectangle(Ui.S(16) + i * Ui.S(94), Ui.S(271), Ui.S(86), Ui.S(76));
     readonly bool showLink;
     Rectangle LinkRect => showLink ? new Rectangle(Ui.S(8), Ui.S(366), Ui.S(384), Ui.S(44)) : Rectangle.Empty;
-
-    // Кнопка «ярлык» показывается, если устройство есть и ярлыка ещё нет
-    bool ChipVisible(int i) => state[i] != -1 && !created[i] && !existed[i];
 
     // ----- Рисование -----
     protected override void OnPaint(PaintEventArgs e)
@@ -1530,40 +1558,11 @@ class StatusForm : RoundForm
             Ui.DrawText(g, sw[FuncKeys[i]].Name, nameFont, Theme.Text,
                 new RectangleF(tx, r.Y, Ui.S(236) - tx - Ui.S(6), r.Height));
 
-            // Сообщение об ошибке, кнопка «ярлык» или отметка «есть» (только когда мышь над строкой)
+            // Короткое сообщение об ошибке в строке
             if (rowMsg[i] != null && DateTime.Now < rowMsgUntil[i])
             {
                 Ui.DrawText(g, rowMsg[i]!, chipFont, Theme.Bad,
                     new RectangleF(Ui.S(176), r.Y, Ui.S(138), r.Height), StringAlignment.Far);
-            }
-            else if (i == hoverRow && st != -1)
-            {
-                if (ChipVisible(i))
-                {
-                    var c = ChipRect(i);
-                    using var path = Shapes.Round(c, Ui.F(8));
-                    using var fill = new SolidBrush(hoverChip ? Theme.Row : Theme.Btn);
-                    g.FillPath(fill, path);
-                    using var border = new Pen(Theme.BtnLine);
-                    g.DrawPath(border, path);
-                    Ui.DrawText(g, Loc.T("sp_shortcut"), chipFont, Theme.Text, c, StringAlignment.Center);
-                }
-                else
-                {
-                    Color c2 = created[i] ? Theme.On : Theme.Sub;
-                    string word = created[i] ? Loc.T("sp_created") : Loc.T("sp_exists");
-                    Ui.DrawText(g, word, chipFont, c2,
-                        new RectangleF(Ui.S(246), r.Y, Ui.S(68), r.Height), StringAlignment.Far);
-                    float cy = r.Y + r.Height / 2f;
-                    float x0 = Ui.S(314) - Ui.S(24) - (created[i] ? Ui.S(50) : Ui.S(34));
-                    using var tick = new Pen(c2, Ui.F(2.2)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
-                    g.DrawLines(tick, new[]
-                    {
-                        new PointF(x0, cy),
-                        new PointF(x0 + Ui.F(5), cy + Ui.F(5)),
-                        new PointF(x0 + Ui.F(14), cy - Ui.F(5))
-                    });
-                }
             }
 
             // Справа переключатель или «нет», если устройства нет
@@ -1632,17 +1631,16 @@ class StatusForm : RoundForm
     void UpdateHover(Point p)
     {
         int row = -1, act = -1;
-        bool link = false, chip = false;
+        bool link = false;
         for (int i = 0; i < 4; i++)
             if (RowRect(i).Contains(p)) { row = i; break; }
-        if (row >= 0 && ChipVisible(row) && ChipRect(row).Contains(p)) chip = true;
         for (int i = 0; i < 4; i++)
             if (ActionRect(i).Contains(p)) act = i;
         if (LinkRect.Contains(p)) link = true;
 
-        if (row != hoverRow || act != hoverAction || link != hoverLink || chip != hoverChip)
+        if (row != hoverRow || act != hoverAction || link != hoverLink)
         {
-            hoverRow = row; hoverAction = act; hoverLink = link; hoverChip = chip;
+            hoverRow = row; hoverAction = act; hoverLink = link;
             Invalidate();
         }
         Cursor = row >= 0 || act >= 0 || link ? Cursors.Hand : Cursors.Default;
@@ -1657,7 +1655,7 @@ class StatusForm : RoundForm
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        hoverRow = -1; hoverAction = -1; hoverLink = false; hoverChip = false;
+        hoverRow = -1; hoverAction = -1; hoverLink = false;
         Cursor = Cursors.Default;
         Invalidate();
     }
@@ -1671,8 +1669,7 @@ class StatusForm : RoundForm
         for (int i = 0; i < 4; i++)
         {
             if (!RowRect(i).Contains(p)) continue;
-            if (ChipVisible(i) && ChipRect(i).Contains(p)) MakeShortcut(i);
-            else if (state[i] != -1 && !busy[i]) ToggleRow(i);
+            if (state[i] != -1 && !busy[i]) ToggleRow(i);
             else if (state[i] == -1)
             {
                 Msg(i, Loc.T("sp_notfound"));   // устройства нет: проверяем ещё раз, вдруг уже появилось
@@ -1731,24 +1728,6 @@ class StatusForm : RoundForm
             if (changed) Invalidate();
         }
         finally { refreshing = false; }
-    }
-
-    // Ярлык этой функции на рабочий стол
-    void MakeShortcut(int i)
-    {
-        try
-        {
-            string exe = Shortcuts.Install(out _);
-            int n = Shortcuts.CreateOnDesktop(new[] { FuncKeys[i] }, exe);
-            if (n > 0)
-            {
-                created[i] = true;
-                playClick(1);
-            }
-            else Msg(i, Loc.T("sp_failed"));
-        }
-        catch { Msg(i, Loc.T("sp_failed")); }
-        Invalidate();
     }
 
     void Msg(int i, string text)
