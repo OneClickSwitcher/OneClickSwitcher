@@ -9,10 +9,10 @@ $ErrorActionPreference = "Stop"
 
 # ===== НАСТРОЙКИ =====
 # Три значения ниже берутся в Партнёрском центре: Управление продуктом, Идентификация продукта.
-# Пока их нет, оставьте как есть: пакет соберётся, но в Магазин не отправится.
-$StoreName = "PUT-PACKAGE-IDENTITY-NAME-HERE"           # Package/Identity/Name
-$StorePublisher = "CN=PUT-PUBLISHER-ID-HERE"            # Package/Identity/Publisher
-$StorePublisherDisplayName = "PUT-PUBLISHER-NAME-HERE"  # PublisherDisplayName
+# Значения уже вписаны (получены 11 октября 2026).
+$StoreName = "DenysBoiko.OneClickSwitcher"                # Package/Identity/Name
+$StorePublisher = "CN=6DF6E392-4678-4E0C-B87C-AB808E3C438F"  # Package/Identity/Publisher
+$StorePublisherDisplayName = "Denys Boiko"                # PublisherDisplayName
 $Version = "1.0.0.0"                                    # при каждом новом выпуске увеличивайте, последнюю цифру оставляйте 0
 
 $proj = "C:\Tools\OneClickSwitcher"     # папка с проектом (Program.cs и .csproj)
@@ -103,7 +103,7 @@ $manifest = @'
   </Resources>
   <Applications>
     <Application Id="App" Executable="OneClickSwitcher.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="One Click Switcher" Description="Switch Bluetooth, Wi-Fi, microphone and sound with one click on a shortcut." BackgroundColor="#2F3B52" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+      <uap:VisualElements DisplayName="One Click Switcher" Description="Switch Bluetooth, Wi-Fi, microphone and sound with one click on a shortcut." BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
