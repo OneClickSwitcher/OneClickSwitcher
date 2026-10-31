@@ -339,6 +339,44 @@ int GetMicState()
     }
 }
 
+// ===== Микрофоны: запоминаем громкость, чтобы вернуть её при включении =====
+// Некоторые микрофоны (например, в недорогих веб-камерах) игнорируют заглушение Windows.
+// Поэтому при выключении мы дополнительно ставим громкость 0, а при включении возвращаем прежнюю.
+string MicVolumeFile() => Path.Combine(Path.GetDirectoryName(Shortcuts.IconsDir)!, "mic-volumes.txt");
+
+Dictionary<string, float> LoadMicVolumes()
+{
+    var map = new Dictionary<string, float>();
+    try
+    {
+        string file = MicVolumeFile();
+        if (!File.Exists(file)) return map;
+        foreach (var line in File.ReadAllLines(file))
+        {
+            int bar = line.LastIndexOf('|');
+            if (bar <= 0) continue;
+            if (float.TryParse(line.Substring(bar + 1), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float v))
+                map[line.Substring(0, bar)] = v;
+        }
+    }
+    catch { }
+    return map;
+}
+
+void SaveMicVolumes(Dictionary<string, float> map)
+{
+    try
+    {
+        string file = MicVolumeFile();
+        if (map.Count == 0) { if (File.Exists(file)) File.Delete(file); return; }
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllLines(file, map.Select(p =>
+            p.Key + "|" + p.Value.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)));
+    }
+    catch { }
+}
+
 // ===== Микрофоны: глушим или включаем сразу все =====
 int ToggleMicrophones()
 {
@@ -351,12 +389,36 @@ int ToggleMicrophones()
         // Если хоть один микрофон не заглушен, то сейчас «включён»: глушим все
         bool anyOn = mics.Any(m => !m.AudioEndpointVolume.Mute);
 
+        var saved = LoadMicVolumes();
         int changed = 0;
         foreach (var m in mics)
         {
-            try { m.AudioEndpointVolume.Mute = anyOn; changed++; }
+            try
+            {
+                var vol = m.AudioEndpointVolume;
+                if (anyOn)
+                {
+                    // Выключаем: запоминаем громкость (если она не нулевая), глушим и ставим громкость 0
+                    float current = vol.MasterVolumeLevelScalar;
+                    if (current > 0.001f) saved[m.ID] = current;
+                    vol.Mute = true;
+                    try { vol.MasterVolumeLevelScalar = 0f; } catch { }
+                }
+                else
+                {
+                    // Включаем: сначала возвращаем громкость (только если она всё ещё 0), потом снимаем заглушение
+                    if (saved.TryGetValue(m.ID, out float old))
+                    {
+                        try { if (vol.MasterVolumeLevelScalar < 0.001f) vol.MasterVolumeLevelScalar = old; } catch { }
+                        saved.Remove(m.ID);
+                    }
+                    vol.Mute = false;
+                }
+                changed++;
+            }
             catch { }
         }
+        SaveMicVolumes(saved);
         if (changed == 0) return -2;
 
         return anyOn ? 0 : 1;
