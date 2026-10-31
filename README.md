@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-A simple utility for Windows 11: toggles and actions in one click from the taskbar or the desktop.
+A simple utility for Windows 10 and 11: toggles and actions in one click from the taskbar or the desktop.
 No tray icon and no background processes: the program starts on click, does its job and exits.
 
 ## What it can do
