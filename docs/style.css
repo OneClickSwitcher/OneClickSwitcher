@@ -29,7 +29,7 @@ h1 span{color:var(--accent)}
 .lead{font-size:19px;color:var(--muted);margin:0 0 28px;max-width:34em}
 /* hero video */
 .video{border-radius:18px;overflow:hidden;border:1px solid var(--line);background:var(--bg2);box-shadow:0 30px 60px rgba(0,0,0,.3);aspect-ratio:16/9}
-.video video{display:block;width:100%;height:100%;object-fit:cover}
+.video img{display:block;width:100%;height:100%;object-fit:cover}
 /* sections */
 section{padding:64px 0;scroll-margin-top:64px}
 section.alt{background:var(--bg2)}
@@ -63,8 +63,14 @@ details p{margin:0 0 16px;color:var(--muted)}
 .cta h2{margin-bottom:22px}
 .sub{color:var(--muted);margin:-14px 0 28px;max-width:46em}
 /* screenshots */
-.shots{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
-@media (max-width:700px){.shots{grid-template-columns:1fr}}
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media (max-width:900px){.shots{grid-template-columns:1fr}}
+/* function links */
+a.card.fn{display:block;text-decoration:none;color:inherit;transition:border-color .15s,transform .15s}
+a.card.fn:hover{border-color:var(--accent);transform:translateY(-2px)}
+a.card.fn h3::after{content:" →";color:var(--accent)}
+.article .shot{margin:24px 0 8px}
+.article .shot img{width:100%;height:auto;border-radius:14px;border:1px solid var(--line)}
 .shots figure{margin:0;border-radius:var(--radius);overflow:hidden;border:1px solid rgba(255,255,255,.08)}
 .shots img{width:100%;height:auto}
 .more-cta{text-align:center;margin-top:36px}

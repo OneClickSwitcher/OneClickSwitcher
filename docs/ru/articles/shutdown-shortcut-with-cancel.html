@@ -3,16 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ярлык выключения компьютера с возможностью отмены | One Click Switcher</title>
-<meta name="description" content="Как сделать ярлык выключения Windows, который можно отменить: команда shutdown с таймером и кнопка с обратным отсчётом.">
+<title>Ярлык выключения компьютера на рабочий стол — с отсчётом и отменой | One Click Switcher</title>
+<meta name="description" content="Как сделать ярлык выключения компьютера в Windows 10 и 11: команда shutdown с таймером и кнопка с обратным отсчётом 5 секунд и отменой.">
 <link rel="canonical" href="https://oneclickswitcher.com/ru/articles/shutdown-shortcut-with-cancel.html">
 <link rel="alternate" hreflang="ru" href="https://oneclickswitcher.com/ru/articles/shutdown-shortcut-with-cancel.html">
 <link rel="alternate" hreflang="en" href="https://oneclickswitcher.com/articles/shutdown-shortcut-with-cancel.html">
 <link rel="alternate" hreflang="x-default" href="https://oneclickswitcher.com/articles/shutdown-shortcut-with-cancel.html">
-<meta property="og:type" content="website">
-<meta property="og:title" content="Ярлык выключения компьютера с возможностью отмены | One Click Switcher">
-<meta property="og:description" content="Как сделать ярлык выключения Windows, который можно отменить: команда shutdown с таймером и кнопка с обратным отсчётом.">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Ярлык выключения компьютера на рабочий стол — с отсчётом и отменой | One Click Switcher">
+<meta property="og:description" content="Как сделать ярлык выключения компьютера в Windows 10 и 11: команда shutdown с таймером и кнопка с обратным отсчётом 5 секунд и отменой.">
 <meta property="og:url" content="https://oneclickswitcher.com/ru/articles/shutdown-shortcut-with-cancel.html">
+<meta property="og:image" content="https://oneclickswitcher.com/media/shutdown-ru.png">
 <meta name="theme-color" content="#2E3A52">
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -28,22 +29,24 @@
 <main>
 <article class="article">
 <a class="back" href="../../ru/">← На главную</a>
-<h1>Ярлык выключения компьютера с возможностью отмены</h1>
+<h1>Ярлык выключения компьютера на рабочий стол — с отсчётом и отменой</h1>
+<figure class="shot"><img src="../../media/shutdown-ru.png" alt="Окно обратного отсчёта перед выключением с кнопкой «Отмена»" width="1600" height="900"></figure>
 <p>Кнопка выключения на рабочем столе удобна, пока её не нажмёшь случайно и не потеряешь несохранённую работу. Поэтому хороший ярлык выключения должен давать пару секунд на отмену.</p>
-<h2>Способ 1. Ярлык с командой shutdown</h2>
+<h2>Способ 1. Меню «Пуск» и Alt + F4</h2>
+<p><b>Пуск → значок питания → Завершение работы</b>. Или на пустом рабочем столе <kbd>Alt</kbd> + <kbd>F4</kbd> → <b>Завершение работы</b>. Отменить после нажатия уже нельзя.</p>
+<h2>Способ 2. Ярлык с командой shutdown</h2>
 <ol><li>Щёлкните правой кнопкой по рабочему столу → <b>Создать → Ярлык</b>.</li>
 <li>В поле расположения введите: <code>shutdown /s /t 30</code></li>
 <li>Назовите ярлык «Выключение» и нажмите <b>Готово</b>.</li></ol>
 <p>Компьютер выключится через 30 секунд. Чтобы отменить, нужен второй ярлык с командой <code>shutdown /a</code> — или успеть ввести её в окне <kbd>Win</kbd> + <kbd>R</kbd>. Работает, но отменять неудобно, а обратного отсчёта на экране не видно.</p>
-<h2>Способ 2. Кнопка с отсчётом и отменой</h2>
+<h2>Способ 3. Кнопка с отсчётом и отменой</h2>
 <p>В <b>One Click Switcher</b> кнопка «Выключение» сразу показывает окно с отсчётом 5 секунд и тихим звуком. Отменить можно любым естественным способом:</p>
 <ul><li>кнопкой <b>«Отмена»</b>;</li><li>клавишей <kbd>Esc</kbd> или <kbd>Пробел</kbd>;</li><li>щелчком по окну отсчёта;</li><li>повторным нажатием на тот же значок.</li></ul>
-<p>Так же устроена кнопка «Перезагрузка». Никаких вторых ярлыков и команд.</p>
 <div class="inline-cta"><div><b>Хотите одним щелчком?</b><p>Бесплатно · Windows 10 и 11 · без рекламы</p></div><a class="btn" href="https://apps.microsoft.com/detail/9PL734RR6PH3?cid=site-shutdown-ru" rel="noopener"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h16l-1 12H5z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>Получить в Microsoft Store</a></div>
 <h2>Что выбрать</h2>
-<p>Если нужен таймер на полчаса или час — подойдёт команда <code>shutdown</code> с нужным числом секунд. Если нужна просто кнопка «выключить сейчас», которая прощает случайное нажатие, — удобнее кнопка с отсчётом.</p>
+<p>Если нужен таймер на полчаса или час — подойдёт команда <code>shutdown</code> с нужным числом секунд (<code>/t 3600</code> — это час). Если нужна просто кнопка «выключить сейчас», которая прощает случайное нажатие, — удобнее кнопка с отсчётом.</p>
 </article>
-<div class="more"><h2>Другие инструкции</h2><div class="alist"><a href="mute-microphone-one-click.html">Как выключить микрофон одним щелчком в Windows 10 и 11<span>→</span></a><a href="bluetooth-one-click.html">Как включать и выключать Bluetooth одним щелчком<span>→</span></a><a href="wifi-one-click.html">Как быстро выключить Wi-Fi в Windows 10 и 11<span>→</span></a><a href="lock-sleep-taskbar.html">Кнопка блокировки и сна на панели задач Windows 10 и 11<span>→</span></a></div></div>
+<div class="more"><h2>Другие функции</h2><div class="alist"><a href="mute-microphone-one-click.html">Как выключить микрофон на компьютере<span>→</span></a><a href="mute-sound-one-click.html">Как быстро выключить звук на компьютере<span>→</span></a><a href="bluetooth-one-click.html">Как включить и выключить Bluetooth на компьютере<span>→</span></a><a href="wifi-one-click.html">Как отключить Wi-Fi на ноутбуке или компьютере<span>→</span></a><a href="lock-sleep-taskbar.html">Как быстро заблокировать компьютер<span>→</span></a><a href="sleep-shortcut.html">Ярлык спящего режима на рабочий стол<span>→</span></a><a href="restart-shortcut.html">Ярлык перезагрузки компьютера<span>→</span></a></div></div>
 </main>
 <footer><div class="wrap">
 <span>© 2026 One Click Switcher · Denys Boiko</span>
