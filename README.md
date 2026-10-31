@@ -24,13 +24,15 @@ Double-click protection: repeated launches of the same function within about hal
 
 ## Install
 
-- **Microsoft Store:** coming soon.
+- **Microsoft Store (free):** <https://apps.microsoft.com/detail/9PL734RR6PH3?cid=github-readme-en>
 - **From source:** see "Build" below.
+
+Website and how-to guides: <https://oneclickswitcher.com/>
 
 ## Privacy
 
 The app collects no data, has no analytics and does not use the network.
-Full policy: <https://oneclickswitcher.github.io/OneClickSwitcher/>
+Full policy: <https://oneclickswitcher.com/privacy.html>
 
 ## Build
 
